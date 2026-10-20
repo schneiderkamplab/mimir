@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "saved-generation-bertscore-v1",
+  "encoder": "xlm-roberta-large",
+  "revision": "c23d21b0620b635a76227c604d44e43a9f0ee389",
+  "layers": 17,
+  "dtype": "float32",
+  "idf": false,
+  "rescale_with_baseline": false,
+  "empty_prediction_score": 0,
+  "answer_source": "stored final answer",
+  "tasks": {
+    "nordjylland": 500,
+    "wmt-en-da": 960,
+    "govreport": 973
+  },
+  "source": "HRM-test/runs/nordjylland_bertscore_20260924/worker.py"
+}

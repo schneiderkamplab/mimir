@@ -1,0 +1,9 @@
+# @package _global_
+arch:
+  moe_levels: H
+  moe_num_experts: 4
+  moe_top_k: 2
+  mos_num_experts: 4
+  mos_top_k: 2
+  residual_branches: 2
+  residual_levels: both

@@ -1,0 +1,15 @@
+{
+  "transformers": {
+    "url": "https://github.com/huggingface/transformers.git",
+    "revision": "4c414256ddce7b3c896cb624d55d1299ad963d20",
+    "patch": "patches/transformers.patch",
+    "patch_sha256": "4405d23aaf1bddc909b6b8f49194363a87c569017607064d5dda72b397e367dc"
+  },
+  "vllm": {
+    "url": "https://github.com/vllm-project/vllm.git",
+    "revision": "a46abb7ae68acc13a4fc5870db98619b3f97c6e0",
+    "patch": "patches/vllm.patch",
+    "patch_sha256": "b54028811e03c060bacef27fece091ca91c641a4d8e512e13b297fc117c76305",
+    "portability_changes": "Documentation paths use $MIMIR_DEPS; implementation hunks are unchanged."
+  }
+}

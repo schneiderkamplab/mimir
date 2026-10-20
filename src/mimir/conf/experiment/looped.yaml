@@ -1,0 +1,8 @@
+# @package _global_
+arch:
+  recurrence_mode: looped
+  half_layers: false
+  H_override:
+    n_layers: 0
+  H_cycles: 4
+  L_cycles: 1

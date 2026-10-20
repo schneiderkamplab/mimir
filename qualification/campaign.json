@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "device": "cpu",
+  "steps": 4,
+  "exact": [
+    "weights",
+    "optimizer",
+    "EMA",
+    "RNG",
+    "losses",
+    "recurrence/LR schedules",
+    "sample position"
+  ],
+  "campaign": [
+    "train",
+    "checkpoint",
+    "EMA export",
+    "local evaluation",
+    "resume",
+    "disk suspension"
+  ]
+}

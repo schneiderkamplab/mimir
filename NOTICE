@@ -1,0 +1,24 @@
+Mimir includes adaptations of HRM-Text/Mimir native model and training code.
+Original native source is licensed under the Apache License, Version 2.0;
+LICENSE retains that text. Source revision and per-file working-tree hashes are
+recorded in provenance/native-source.json. Existing author/copyright notices
+remain in dependency patches and imported tests.
+
+Transformers integration: Hugging Face contributors and The Mimir authors,
+Apache-2.0. vLLM integration: vLLM contributors and Mimir integration authors,
+Apache-2.0. Full dependency repositories retain their original LICENSE/NOTICE
+files when materialized. FlashAttention and EuroEval retain their own licenses.
+No model weights, tokenized production data, benchmark datasets or credentials
+are distributed here.
+
+Evaluation task adaptations originate from HRM-test and its frozen dfm-evals
+sources. File hashes identify the exact sources. Those task directories did not
+contain a separate LICENSE file at capture time. Do not infer that this notice
+relicenses third-party tasks, datasets or models; resolve redistribution terms
+before a public release. The original repository MIT notice is preserved in
+licenses/initial-repository-MIT.txt; it does not replace upstream licenses.
+
+Muon mathematical implementation follows the attribution retained in the
+native optimizer source. Baseline implementation is retained privately as a
+Mimir2 recurrence component and as a numerical test oracle, not a second CLI
+architecture.

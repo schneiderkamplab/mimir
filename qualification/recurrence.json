@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-20",
+  "device": "cpu",
+  "full_suite": {
+    "passed": 252,
+    "subtests_passed": 25,
+    "warnings": 28
+  },
+  "coverage": [
+    "H MoE and L MoS with dense/sparse execution",
+    "H/L/both residual selection",
+    "explicit loop unroll outputs and gradients",
+    "zero-layer H",
+    "L-only truncated backward allocation and automatic LR",
+    "native KV cache parity",
+    "state roundtrip",
+    "export and serving rejection"
+  ],
+  "training_smoke": {
+    "steps": 2,
+    "mode": "looped",
+    "h_layers": 0,
+    "lr_auto": true,
+    "checkpoint": "step_2"
+  },
+  "limitations": [
+    "looped Transformers/vLLM export unsupported",
+    "new recurrence GPU/distributed qualification not run"
+  ],
+  "final_logging_regression": {
+    "passed": 73,
+    "environment": "rebuilt wheel in isolated environment"
+  }
+}

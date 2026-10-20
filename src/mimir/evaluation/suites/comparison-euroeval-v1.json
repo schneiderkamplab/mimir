@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "tasks": [
+    {
+      "id": "angry-tweets",
+      "backend": "euroeval",
+      "dataset": "angry-tweets",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:35:49.394452+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_macro_f1"
+      ]
+    },
+    {
+      "id": "dala",
+      "backend": "euroeval",
+      "dataset": "dala",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:44:42.197486+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_macro_f1"
+      ]
+    },
+    {
+      "id": "danish-citizen-tests",
+      "backend": "euroeval",
+      "dataset": "danish-citizen-tests",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:45:42.375455+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_accuracy"
+      ]
+    },
+    {
+      "id": "danske-talemaader",
+      "backend": "euroeval",
+      "dataset": "danske-talemaader",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:48:02.908270+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_accuracy"
+      ]
+    }
+  ],
+  "qualification": "Latest available result records; bootstrap sample membership requires upstream dataset revision qualification."
+}

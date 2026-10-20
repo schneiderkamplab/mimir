@@ -1,0 +1,287 @@
+from typing import TYPE_CHECKING, Tuple, Optional, Sequence, Any, NamedTuple, Literal
+import math
+
+import torch
+from torch import Tensor, nn
+import torch.nn.functional as F
+from einops import rearrange
+
+from mimir.model.common import trunc_normal_init_, unwrap_tensor
+from mimir.model.flash_attention_prefixlm_v2 import flash_attn_varlen_prefixlm
+
+if TYPE_CHECKING:
+    from mimir.model.stability_diagnostics import StabilityDiagnostics
+
+
+Carry = dict[str, Any]
+CosSin = Tuple[Tensor, Tensor]
+AttnType = Literal["causal", "prefixlm"]
+
+
+def find_multiple(a, b):
+    return (-(a // -b)) * b
+
+
+def rotate_half(x: Tensor):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(x: Tensor, cos_sin: CosSin):
+    # x:   [..., seq_len, num_heads, head_dim]
+    # cos, sin: [seq_len, head_dim] OR [..., seq_len, head_dim]
+    # Use FP32 RoPE, as in Transformers OLMo and FlashAttention
+    # 
+    # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/olmo/modular_olmo.py#L139-L152
+    # https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/csrc/flash_attn/src/rotary.h#L126-L133
+    cos, sin = cos_sin
+    return ((x * cos.unsqueeze(-2)) + (rotate_half(x) * sin.unsqueeze(-2))).to(x.dtype)
+
+
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, max_seq_len, base, **kwargs):
+        super().__init__()
+        # RoPE
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, **kwargs) / dim))
+        t = torch.arange(max_seq_len, dtype=torch.float32, **kwargs)
+        freqs = torch.outer(t, inv_freq)
+
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.cos_cached = nn.Buffer(emb.cos(), persistent=False)
+        self.sin_cached = nn.Buffer(emb.sin(), persistent=False)
+
+    def forward(self, position_ids: Tensor):
+        if position_ids is not None:
+            return self.cos_cached[position_ids], self.sin_cached[position_ids]
+
+        return self.cos_cached, self.sin_cached
+
+
+class LinearInit(nn.Module):
+    def __init__(self,
+                 in_features: int,
+                 out_features: int,
+                 bias: bool,
+                 batch_out_features: Sequence[int] = (),
+                 init_std: Optional[float] = None,
+                 **kwargs):
+        super().__init__()
+        self.in_features = in_features
+        # Truncated LeCun normal init
+        if init_std is None:
+            init_std = 1.0 / (in_features ** 0.5)
+
+        # Parameters
+        self.weight = nn.Parameter(
+            trunc_normal_init_(torch.empty((math.prod(batch_out_features) * out_features, in_features), **kwargs), std=init_std)  # pyright: ignore[reportArgumentType]
+        )
+        self.bias = None
+        if bias:
+            # Zero init bias
+            self.bias = nn.Parameter(torch.zeros((math.prod(batch_out_features) * out_features, ), **kwargs))
+
+    def forward(self, input: Tensor) -> Tensor:
+        return F.linear(input, self.weight, self.bias)
+
+
+class ScaledEmbeddingInit(nn.Module):
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 init_std: float,
+                 **kwargs):
+        super().__init__()
+        self.scale = 1.0 / init_std
+
+        self.embedding_weight = nn.Parameter(
+            trunc_normal_init_(torch.empty((num_embeddings, embedding_dim), **kwargs), std=init_std)  # pyright: ignore[reportArgumentType]
+        )
+
+    def forward(self, input: Tensor) -> Tensor:
+        return self.scale * F.embedding(input, self.embedding_weight)
+
+
+class Cache(NamedTuple):
+    """A static cache layer that stores the key and value states as static tensors. Built for `torch.compile` support."""
+    keys: Tensor
+    values: Tensor
+
+    @classmethod
+    def create(cls, max_batch_size: int, max_seq_len: int, num_heads: int, head_dim: int, **kwargs):
+        return cls(keys=torch.zeros((max_batch_size, max_seq_len, num_heads, head_dim), **kwargs),
+                   values=torch.zeros((max_batch_size, max_seq_len, num_heads, head_dim), **kwargs))
+
+
+class Attention(nn.Module):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, attn_type, prefixlm_fa4_impl="seqused", prefixlm_fa4_grad_mask_impl="triton", prefixlm_fa4_output_combine_impl="triton", init_std_in=None, init_std_out=None, **kwargs):
+        super().__init__()
+        self.head_dim = head_dim
+        self.num_heads = num_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.attn_type = attn_type
+        self.prefixlm_fa4_impl = prefixlm_fa4_impl
+        self.prefixlm_fa4_grad_mask_impl = prefixlm_fa4_grad_mask_impl
+        self.prefixlm_fa4_output_combine_impl = prefixlm_fa4_output_combine_impl
+
+        self.gqkv_proj = LinearInit(hidden_size, self.head_dim, batch_out_features=(2 * self.num_heads + 2 * self.num_key_value_heads, ),
+                                   bias=False, init_std=init_std_in, **kwargs)
+        self.o_proj = LinearInit(head_dim * num_heads, hidden_size,
+                                 bias=False, init_std=init_std_out, **kwargs)
+
+    def _attention_with_cache(self, query: Tensor, key: Tensor, value: Tensor, cache: Cache, cache_lengths: Tensor, causal: bool, cache_batch_indices=None) -> Tensor:
+        batch_size, seqlen = query.shape[:2]
+        positions = cache_lengths[:, None] + torch.arange(seqlen, device=query.device, dtype=cache_lengths.dtype)
+        rows = torch.arange(batch_size, device=query.device) if cache_batch_indices is None else cache_batch_indices
+        batch_idx = rows[:, None]
+        cache.keys[batch_idx, positions] = key
+        cache.values[batch_idx, positions] = value
+
+        kv_len = cache_lengths + seqlen
+        max_kv_len = kv_len.max().item()
+        keys = cache.keys[:batch_size, :max_kv_len] if cache_batch_indices is None else cache.keys[rows, :max_kv_len]
+        values = cache.values[:batch_size, :max_kv_len] if cache_batch_indices is None else cache.values[rows, :max_kv_len]
+
+        if self.num_heads != self.num_key_value_heads:
+            repeat = self.num_heads // self.num_key_value_heads
+            keys = keys.repeat_interleave(repeat, dim=2)
+            values = values.repeat_interleave(repeat, dim=2)
+
+        q = query.transpose(1, 2)
+        k = keys.transpose(1, 2)
+        v = values.transpose(1, 2)
+
+        key_positions = torch.arange(max_kv_len, device=query.device)
+        valid = key_positions[None, :] < kv_len[:, None]
+        if causal:
+            query_positions = positions
+            valid = valid[:, None, :] & (key_positions[None, None, :] <= query_positions[:, :, None])
+        else:
+            valid = valid[:, None, :]
+        attn_mask = torch.zeros((batch_size, seqlen, max_kv_len), dtype=query.dtype, device=query.device)
+        attn_mask = attn_mask.masked_fill(~valid, torch.finfo(query.dtype).min)
+
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask[:, None], enable_gqa=False)
+        return out.transpose(1, 2)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        cos_sin: Optional[CosSin],
+        cache: Optional[Cache] = None,
+        cache_lengths: Optional[Tensor] = None,
+        stability_diagnostics: Optional["StabilityDiagnostics"] = None,
+        stability_scope: Optional[str] = None,
+        **seq_info,
+    ) -> Tensor:
+        # hidden_states, gqkv: [..., seq_len, hidden_size]
+        gqkv = self.gqkv_proj(hidden_states)
+
+        # Split head (last dimension of projected qkv)
+        gqkv = rearrange(gqkv, "... (h hd) -> ... h hd", h=2 * self.num_heads + 2 * self.num_key_value_heads)
+        gate, query, key, value = gqkv.split((self.num_heads, self.num_heads, self.num_key_value_heads, self.num_key_value_heads), dim=-2)
+        # query, key, value: [..., seq_len, num_heads, head_dim]
+        # RoPE
+        if cos_sin is not None:
+            query = apply_rotary_pos_emb(query, cos_sin)
+            key = apply_rotary_pos_emb(key, cos_sin)
+
+        if stability_diagnostics is not None:
+            if stability_scope is None:
+                raise ValueError("stability_scope is required when diagnostics are enabled")
+            gate_values = torch.sigmoid(gate)
+            for name, projected in (
+                ("gate_logits", gate),
+                ("gate_values", gate_values),
+                ("query", query),
+                ("key", key),
+                ("value", value),
+            ):
+                stability_diagnostics.record_tensor(
+                    f"activation/{stability_scope}/{name}", projected, record_gradient=True
+                )
+                stability_diagnostics.record_last_dim_rms(
+                    f"activation/{stability_scope}/{name}_head_rms", projected
+                )
+            stability_diagnostics.record_fraction(
+                f"activation/{stability_scope}/gate_near_zero", gate_values < 0.01
+            )
+            stability_diagnostics.record_fraction(
+                f"activation/{stability_scope}/gate_near_one", gate_values > 0.99
+            )
+            if query.shape[-2] == key.shape[-2]:
+                aligned_qk_score = (query * key).sum(dim=-1) / math.sqrt(self.head_dim)
+                stability_diagnostics.record_tensor(
+                    f"activation/{stability_scope}/aligned_qk_score", aligned_qk_score
+                )
+
+        is_causal = self.attn_type == "causal"
+        if cache is None:
+            # flash attn (training)
+            attn_output = flash_attn_varlen_prefixlm(
+                query,
+                key,
+                value,
+                is_causal,
+                fa4_impl=self.prefixlm_fa4_impl,
+                fa4_grad_mask_impl=self.prefixlm_fa4_grad_mask_impl,
+                fa4_output_combine_impl=self.prefixlm_fa4_output_combine_impl,
+                **{name: unwrap_tensor(tensor) for name, tensor in seq_info.items()},
+            )
+        else:
+            # Regardless of auto / non-autoregressive, apply attention based on current concatenated with cache.
+            attn_output = self._attention_with_cache(query, key, value, cache, cache_lengths, is_causal,
+                                                   seq_info.get('cache_batch_indices'))
+
+        # attn_output: [..., seq_len, num_heads, head_dim]
+        attn_output = rearrange(torch.sigmoid(gate) * attn_output, "... h hd -> ... (h hd)")  # type: ignore
+        if stability_diagnostics is not None:
+            stability_diagnostics.record_tensor(
+                f"activation/{stability_scope}/gated_attention_output",
+                attn_output,
+                record_gradient=True,
+            )
+        output = self.o_proj(attn_output)
+        if stability_diagnostics is not None:
+            stability_diagnostics.record_tensor(
+                f"activation/{stability_scope}/projected_output",
+                output,
+                record_gradient=True,
+            )
+        return output
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int, init_std_in=None, init_std_out=None, **kwargs):
+        super().__init__()
+        self.gate_up_proj = LinearInit(hidden_size, intermediate_size, batch_out_features=(2, ),
+                                       bias=False, init_std=init_std_in, **kwargs)
+        self.down_proj    = LinearInit(intermediate_size, hidden_size,
+                                       bias=False, init_std=init_std_out, **kwargs)
+
+    def forward(
+        self,
+        x,
+        stability_diagnostics: Optional["StabilityDiagnostics"] = None,
+        stability_scope: Optional[str] = None,
+    ):
+        gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+        product = F.silu(gate) * up
+        if stability_diagnostics is not None:
+            if stability_scope is None:
+                raise ValueError("stability_scope is required when diagnostics are enabled")
+            for name, projected in (("gate", gate), ("up", up), ("product", product)):
+                stability_diagnostics.record_tensor(
+                    f"activation/{stability_scope}/{name}", projected, record_gradient=True
+                )
+                stability_diagnostics.record_last_dim_rms(
+                    f"activation/{stability_scope}/{name}_token_rms", projected
+                )
+        output = self.down_proj(product)
+        if stability_diagnostics is not None:
+            stability_diagnostics.record_tensor(
+                f"activation/{stability_scope}/down_output", output, record_gradient=True
+            )
+        return output

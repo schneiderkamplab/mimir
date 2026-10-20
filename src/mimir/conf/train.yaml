@@ -1,0 +1,92 @@
+defaults:
+  - model@arch: mimir2
+  - size@arch: XL
+  - data: sampled
+  - _self_
+
+hydra:
+  output_subdir: null
+
+global_batch_size: 196608  # Effective optimizer batch size (tokens)
+gradient_accumulation_steps: 1  # Physical per-rank microbatch is global_batch_size / world_size / gradient_accumulation_steps
+gradient_clip_norm: null  # Optional global L2 threshold in mean-gradient units; null preserves the unclipped path
+gradient_skip_norm: null  # Optional pre-moment anomaly threshold; skips the optimizer/EMA update but consumes the batch
+gradient_skip_max_consecutive: 3  # Save a regular checkpoint and exit cleanly after this many consecutive skips
+epochs: 4
+training_total_steps: null  # Optional global optimizer-step endpoint for resumed runs that switch datasets.
+checkpoint_interval: 1
+checkpoint_step_interval: null
+max_steps: null  # Optional early stop after N optimizer steps (benchmarking/debugging)
+benchmark_state_fingerprint: false  # Expensive distributed parameter/optimizer/EMA checksums for parity tests
+stop_after_step: null  # Optional global optimizer step: force a regular step checkpoint, then exit cleanly.
+suspension_backend: disk
+suspension_settings: null
+suspend_control_dir: null  # Opt-in single-node CUDA suspension; use the checkpointable launcher.
+suspend_after_steps: []
+suspend_poll_interval_steps: 10
+suspend_wait_poll_seconds: 2
+dataloader_prefetch_factor: 8  # Batches the single dataloader worker prefetches ahead
+ephemeral_checkpoint_step_interval: null  # Optional resumability checkpoint cadence; keeps only latest ephemeral_step_* unless superseded by a regular step checkpoint.
+checkpoint_format: sharded  # sharded uses FSDP/DCP fsdp2_{tag}; unsharded writes unsharded_{tag}.pt from global rank 0
+wandb_run_id: null
+wandb_resume: null
+initialize_from: null
+resume_checkpoint_path: null
+resume_checkpoint_tag: null
+resume_epoch: null
+resume_step: null
+resume_batch_in_epoch: null
+upcast_optimizer_state_on_resume: false
+reset_ema_on_resume: false
+project_name: null
+run_name: null
+checkpoint_path: null
+seed: 0
+log_interval: 5
+
+lr: 2.2e-4
+lr_auto: true
+lr_piecewise_points: null  # Absolute [step, base_lr] anchors; hold outside range.
+lr_rewarm_steps: 0
+lr_rewarm_stages: 1
+lr_rewarm_start_ratio: 0.5
+lr_rewarm_start_step: null
+lr_decay_start_step: null
+lr_decay_end_step: null
+lr_embeddings: null
+lr_head: null
+lr_h: null
+lr_l: null
+lr_min_ratio: 1.0
+lr_warmup_steps: 2000
+lr_cooldown_checkpoint: null  # Optional metadata sidecar: cosine from its row cursor to epoch end.
+
+weight_decay: 0.1
+beta1: 0.9
+optimizer: adam_atan2
+muon_momentum: 0.95
+muon_ns_steps: 5
+muon_lr_scale: 1.0
+beta2: 0.95
+
+ema: 0.9999
+fwd_bwd_dtype: bfloat16
+activation_checkpointing: none  # none, full, l_only, or h_only; checkpoint selected Transformer blocks during backward
+accelerator_type: sm100
+distributed_strategy: fsdp
+fsdp_params_precision: fp32  # FSDP only: fp32 persistent sharded weights by default; set bf16 for bf16 optimizer/master params with fp32 EMA
+fsdp_wrap_policy: transformer_block  # transformer_block is production; recurrent_level is an opt-in H/L communication experiment
+fsdp_shard_degree: null  # null preserves full-world FSDP; smaller divisors enable native FSDP2 hybrid sharding
+fsdp_reshard_after_forward: null  # null preserves current behavior; true/false explicitly overrides every FSDP-wrapped module
+fsdp_accumulation_sync_mode: no_sync  # no_sync defers all FSDP comms; reduce_scatter retains HSDP shard-local reduction and defers replica all-reduce
+ddp_params_precision: fp32  # DDP only: fp32 persistent params + bf16 autocast compute, or bf16 params with fp32 EMA
+ddp_find_unused_parameters: true
+compile_train_batch: true
+compile_train_batch_mode: default  # default or max-autotune-no-cudagraphs; graph-enabled modes need explicit integration
+memory_log_interval: 0
+empty_cache_interval: 0
+resume_trace: false
+stability_diagnostics_interval: 0  # 0 disables all recorder objects, hooks, reductions, and diagnostic I/O
+stability_diagnostics_max_tokens_per_microbatch: 4096  # Whole leading packed sequences used only by the diagnostic shadow replay
+stability_diagnostics_output: null  # Defaults to <checkpoint_path>/stability_diagnostics.jsonl when enabled
+stability_diagnostics_wandb_detailed: false  # false logs compact stability/* summaries; true also logs all stability_detail/* keys

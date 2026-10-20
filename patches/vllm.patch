@@ -1,0 +1,1265 @@
+diff --git a/.gitignore b/.gitignore
+index c70200ed09..6f96a6fcd1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -252,3 +252,6 @@ vllm/grpc/vllm_engine_pb2.pyi
+ 
+ # Ignore generated cpu headers 
+ csrc/cpu/cpu_attn_dispatch_generated.h
++
++# Isolated development JIT cache.
++.runtime-cache/
+diff --git a/docs/models/supported_models.md b/docs/models/supported_models.md
+index 0826ec7d57..9e1b9b4aff 100644
+--- a/docs/models/supported_models.md
++++ b/docs/models/supported_models.md
+@@ -419,6 +419,7 @@ th {
+ | `Grok1ModelForCausalLM` | Grok1 | `hpcai-tech/grok-1`. | ✅︎ | ✅︎ |
+ | `Grok1ForCausalLM` | Grok2 | `xai-org/grok-2` | ✅︎ | ✅︎ |
+ | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
++| `Mimir2ForCausalLM` | Mimir2 (local Transformers fork required) | Local converted checkpoints; see [Mimir2](mimir2.md) | | |
+ | `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
+ | `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
+ | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview` | ✅︎ | ✅︎ |
+diff --git a/tests/models/registry.py b/tests/models/registry.py
+index 29d46860d9..d9f9c00638 100644
+--- a/tests/models/registry.py
++++ b/tests/models/registry.py
+@@ -444,6 +444,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
+         is_available_online=False,
+     ),
+     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
++    "Mimir2ForCausalLM": _HfExamplesInfo(
++        "local-mimir2-checkpoint",
++        is_available_online=False,
++        enable_prefix_caching=False,
++    ),
+     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
+     "MistralLarge3ForCausalLM": _HfExamplesInfo(
+         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+diff --git a/vllm/model_executor/models/hrm_text.py b/vllm/model_executor/models/hrm_text.py
+index a7546b0cc4..202bf5d340 100644
+--- a/vllm/model_executor/models/hrm_text.py
++++ b/vllm/model_executor/models/hrm_text.py
+@@ -129,6 +129,9 @@ class HrmTextAttention(nn.Module):
+         cache_config: CacheConfig | None = None,
+         quant_config: QuantizationConfig | None = None,
+         prefix: str = "",
++        recurrence_steps: list[int] | None = None,
++        attention_cls: type[nn.Module] = PrefillPrefixLMAttention,
++        cache_prefix: str | None = None,
+     ) -> None:
+         super().__init__()
+         self.config = config
+@@ -191,7 +194,9 @@ class HrmTextAttention(nn.Module):
+         H_cycles = config.H_cycles
+         L_cycles = config.L_cycles
+         num_layers_per_stack = config.num_layers_per_stack
+-        if stack_kind == "L":
++        if recurrence_steps is not None:
++            steps_used = recurrence_steps
++        elif stack_kind == "L":
+             steps_used = [
+                 high_cycle_idx * (L_cycles + 1) + low_cycle_idx
+                 for high_cycle_idx in range(H_cycles)
+@@ -215,7 +220,9 @@ class HrmTextAttention(nn.Module):
+             unique_prefix = prefix.replace(
+                 f"layers.{layer_idx_in_stack}", f"layers.{global_idx}"
+             )
+-            self.attn_per_step[str(step)] = PrefillPrefixLMAttention(
++            if cache_prefix is not None:
++                unique_prefix = f"{cache_prefix}.{global_idx}"
++            self.attn_per_step[str(step)] = attention_cls(
+                 num_heads=self.num_heads,
+                 head_size=self.head_dim,
+                 scale=self.scaling,
+diff --git a/vllm/model_executor/models/registry.py b/vllm/model_executor/models/registry.py
+index 6d35b978c0..973e9afc5d 100644
+--- a/vllm/model_executor/models/registry.py
++++ b/vllm/model_executor/models/registry.py
+@@ -158,6 +158,7 @@ _TEXT_GENERATION_MODELS = {
+     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
+     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
+     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
++    "Mimir2ForCausalLM": ("mimir2", "Mimir2ForCausalLM"),
+     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
+     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
+     "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index b958ef79d0..13c6d937fa 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1023,6 +1023,15 @@ class GPUModelRunner(
+ 
+     def _init_model_kwargs(self):
+         model_kwargs = dict[str, Any]()
++        config = self.model_config.hf_config
++        if getattr(config, "model_type", None) == "mimir2" and config.ngram_orders:
++            if not hasattr(self, "mimir2_ngram_windows"):
++                self.mimir2_ngram_windows = torch.full(
++                    (self.max_num_tokens, max(config.ngram_orders)),
++                    -1,
++                    dtype=torch.long,
++                    device=self.device,
++                )
+ 
+         if not self.is_pooling_model:
+             return model_kwargs
+@@ -3778,6 +3787,30 @@ class GPUModelRunner(
+         Returns:
+             Model output tensor
+         """
++        ngram_windows = getattr(self, "mimir2_ngram_windows", None)
++        if ngram_windows is not None:
++            from vllm.model_executor.models.mimir2_routing import prepare_ngram_windows
++
++            windows = prepare_ngram_windows(
++                self.input_batch,
++                self.query_start_loc.np,
++                positions.shape[-1],
++                self.model_config.hf_config.ngram_orders,
++            )
++            ngram_windows[: positions.shape[-1]].copy_(windows)
++            model_kwargs["ngram_windows"] = ngram_windows[: positions.shape[-1]]
++        prepare_sparse_mos = getattr(
++            self.get_model(), "prepare_sparse_mos_inputs", None
++        )
++        if prepare_sparse_mos is not None:
++            model_kwargs.update(
++                prepare_sparse_mos(
++                    self.input_batch,
++                    self.query_start_loc.np,
++                    positions.shape[-1],
++                    self.device,
++                )
++            )
+         return self.model(
+             input_ids=input_ids,
+             positions=positions,
+@@ -5931,6 +5964,11 @@ class GPUModelRunner(
+                 if num_tokens_across_dp is not None:
+                     num_tokens_across_dp[:] = num_tokens_padded
+ 
++            if hasattr(self, "mimir2_ngram_windows"):
++                model_kwargs["ngram_windows"] = self.mimir2_ngram_windows[
++                    :num_tokens_padded
++                ]
++
+             with (
+                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
+                 set_forward_context(
+diff --git a/docs/models/mimir2.md b/docs/models/mimir2.md
+new file mode 100644
+index 0000000000..e5d861b478
+--- /dev/null
++++ b/docs/models/mimir2.md
+@@ -0,0 +1,99 @@
++# Mimir2
++
++This local integration serves converted HRM-Text-v2 checkpoints with architecture
++`Mimir2ForCausalLM`. It requires the companion Transformers checkout that defines
++`Mimir2Config`; upstream published Transformers releases do not yet provide it.
++No remote checkpoint is claimed by the model test registry.
++
++## Supported semantics
++
++- Default features reproduce HRM-Text's H/L recurrence.
++- Per-invocation input-dependent gates load their saved alpha and parameters.
++- Top-k MLP mixtures use dense reference execution, even when the training
++  configuration says `moe_sparse`. This preserves the selected mixture but does
++  not promise sparse inference speedups.
++- Dense mixtures of L stacks support shared or separate recurrent states.
++- Sparse MoS supports first-token and PrefixLM prefix-mean routing with either
++  state mode. Routes are reconstructed from original request prompts, including
++  after scheduler reordering/preemption. Selected projections/MLPs execute
++  sparsely; attention still uses full-batch metadata and KV allocation. This is
++  not a k/n reduction in attention cost or cache memory. Prefix-mean routing
++  currently re-embeds the prompt each decode step.
++- Residual branches, input-dependent residual mixing, and H/L memory branches
++  reuse the cache-independent mathematical helpers from Transformers.
++- Every expert and recurrent attention invocation has a distinct KV-cache slot.
++- Split HF G/Q/K/V and gate/up weights are packed in their original order.
++  Incomplete, duplicate or mixed packed/split projections are rejected. Required
++  feature buffers are checked as well as parameters.
++
++PrefixLM means the entire submitted prompt is bidirectional, followed by causal
++single-token decoding. This is **not** equivalent to ordinary causal prefill or
++to an arbitrary mixed prefix/response mask. Compare against HF with prompt
++`token_type_ids=1`. Prefix caching and chunked prefill must remain disabled;
++vLLM also detects the non-causal attention cache and disables these globally.
++The causal configuration (`prefix_lm=false`) uses normal vLLM attention.
++
++## Explicit limitations
++
++N-gram memory supports independently hashed split-width heads and the native
++contextual sigmoid gate. The worker stages bounded windows from request-owned
++token records in stable graph buffers. Use `async_scheduling=False` (CLI:
++`--no-async-scheduling`). Async scheduling, prompt embeddings and dual batch
++overlap are explicitly rejected for n-grams. CPU request isolation, strict
++weights and fullgraph feature math are tested; n-gram CUDA engine logits and
++graph replay remain unmeasured because all GPUs were occupied. This is an
++Engram-inspired variant, not an exact Qwen reproduction.
++Sparse MoS requires `--enforce-eager`. Speculative decoding, pipeline parallelism
++and quantized loading are rejected. Tensor-parallel primitives are used, but multi-GPU serving
++has not been qualified. CUDA graphs/compilation need separate qualification.
++This integration does not replace the production environment or exports.
++
++## Local environment and checks
++
++The development conda environment is `mimir2`, not `hrm2`. Source checkouts:
++
++- `$MIMIR_DEPS/transformers`, branch `mimir2`.
++- `$MIMIR_DEPS/vllm`, branch `mimir2`, based on
++  `a46abb7ae68acc13a4fc5870db98619b3f97c6e0` (the production-known vLLM revision).
++
++Dependencies are installed with `uv pip`. The editable vLLM installation uses
++matching precompiled binaries, not a production environment clone:
++
++```bash
++conda activate mimir2
++VLLM_USE_PRECOMPILED=1 \
++VLLM_PRECOMPILED_WHEEL_COMMIT=a46abb7ae68acc13a4fc5870db98619b3f97c6e0 \
++VLLM_PRECOMPILED_WHEEL_VARIANT=cu132 \
++uv pip install --no-build-isolation -e $MIMIR_DEPS/vllm -e $MIMIR_DEPS/transformers
++
++python tests/models/language/generation/test_mimir2_contracts.py
++CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=2 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
++  python examples/offline_inference/mimir2_parity.py
++# Repeat with --features and/or --causal.
++# Prepared, NOT GPU-qualified: --ngram --compiled --dtype bfloat16.
++# --features --dtype bfloat16 checks the reduced-precision serving path.
++```
++
++CUDA 13.2 is installed through conda in this environment. Its saved activation
++variables set `CUDA_HOME` to the environment prefix and
++`FLASHINFER_WORKSPACE_BASE=$MIMIR_DEPS/vllm/.runtime-cache`. The pip compiler bundle
++resolved mixed compiler/header versions and failed FlashInfer compilation; use
++the conda toolkit, not `site-packages/nvidia/cu13`, as `CUDA_HOME`.
++
++The smoke uses tiny synthetic weights, a 64 MiB KV allocation, two short
++requests, and three generated tokens per request. It compares greedy IDs and
++log probabilities with HF, without W&B. It is not a full-size benchmark.
++Validated locally: FP32 default and combined-feature PrefixLM, FP32
++combined-feature causal, and BF16 combined-feature PrefixLM. The October 20 contextual-memory extension has nine passing CPU contracts;
++the companion Transformers suite has fifteen passing test methods. These CPU
++results do not extend the preceding GPU qualification to n-grams.
++
++For a real checkpoint, start conservatively with eager execution, a memory
++budget appropriate to the free GPU, and the exported tokenizer's chat template:
++
++```bash
++vllm serve /path/to/mimir2-export --enforce-eager \
++  --no-enable-prefix-caching --no-enable-chunked-prefill
++```
++
++Do not copy the tiny smoke's memory settings for a production checkpoint.
+diff --git a/examples/offline_inference/mimir2_parity.py b/examples/offline_inference/mimir2_parity.py
+new file mode 100644
+index 0000000000..f4feab8108
+--- /dev/null
++++ b/examples/offline_inference/mimir2_parity.py
+@@ -0,0 +1,155 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Tiny loaded-weight HF/vLLM parity, no downloaded models or logging services."""
++
++import argparse
++import tempfile
++
++import torch
++from transformers import Mimir2Config, Mimir2ForCausalLM
++
++from vllm import LLM, SamplingParams
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--ngram", action="store_true")
++    parser.add_argument("--features", action="store_true")
++    parser.add_argument("--causal", action="store_true")
++    parser.add_argument("--sparse", action="store_true")
++    parser.add_argument(
++        "--compiled",
++        action="store_true",
++        help="Enable normal vLLM compilation and CUDA graphs",
++    )
++    parser.add_argument(
++        "--routing", choices=("first_token", "prefix_mean"), default="first_token"
++    )
++    parser.add_argument("--active", type=int, default=1)
++    parser.add_argument("--state", choices=("shared", "separate"), default="shared")
++    parser.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32")
++    args = parser.parse_args()
++    torch.manual_seed(17)
++    features = (
++        dict(
++            gates_enabled=True,
++            gate_alpha=0.7,
++            moe_num_experts=2,
++            moe_top_k=1,
++            moe_sparse=True,
++            moe_levels="both",
++            mos_num_experts=2,
++            mos_top_k=2,
++            mos_state_mode="separate",
++            residual_branches=2,
++            residual_input_dependent=True,
++            residual_alpha=0.6,
++            h_memory_branches=2,
++            memory_alpha=0.5,
++        )
++        if args.features
++        else {}
++    )
++    if args.sparse:
++        features.update(
++            mos_num_experts=3,
++            mos_top_k=args.active,
++            mos_sparse=True,
++            mos_sparse_routing=args.routing,
++            mos_state_mode=args.state,
++        )
++    if args.ngram:
++        features.update(
++            ngram_orders=[2, 3],
++            ngram_heads=4,
++            ngram_contextual_gate=True,
++            ngram_buckets=31,
++            ngram_alpha=0.7,
++        )
++    config = Mimir2Config(
++        vocab_size=128,
++        hidden_size=64,
++        intermediate_size=128,
++        num_hidden_layers=1,
++        num_attention_heads=2,
++        head_dim=32,
++        max_position_embeddings=64,
++        embedding_scale=1.0,
++        prefix_lm=not args.causal,
++        eos_token_id=None,
++        pad_token_id=0,
++        **features,
++    )
++    config._attn_implementation = "sdpa"
++    model = Mimir2ForCausalLM(config).eval()
++    with torch.no_grad():
++        for name, value in model.named_parameters():
++            if any(
++                key in name
++                for key in (
++                    "invocation_gates",
++                    "read_gain",
++                    "rows.",
++                    "biases.",
++                    "ngram.tables",
++                )
++            ):
++                value.normal_(std=0.07)
++    model.to(getattr(torch, args.dtype))
++    prompts = [[1, 2, 3, 4], [9, 8, 7]]
++    expected = []
++    with torch.no_grad():
++        for prompt in prompts:
++            tokens, generated, logprobs = list(prompt), [], []
++            for _ in range(3):
++                ids = torch.tensor([tokens])
++                types = torch.tensor([[1] * len(prompt) + [0] * len(generated)])
++                logits = model(ids, token_type_ids=types, use_cache=False).logits[0, -1]
++                token = logits.argmax().item()
++                logprobs.append(logits.float().log_softmax(-1)[token].item())
++                generated.append(token)
++                tokens.append(token)
++            expected.append((generated, logprobs))
++    with tempfile.TemporaryDirectory(prefix="mimir2-parity-") as folder:
++        model.save_pretrained(folder)
++        engine = LLM(
++            model=folder,
++            skip_tokenizer_init=True,
++            dtype=args.dtype,
++            enforce_eager=not args.compiled,
++            max_model_len=64,
++            max_num_seqs=2,
++            max_num_batched_tokens=64,
++            gpu_memory_utilization=0.02,
++            kv_cache_memory_bytes=64 * 1024 * 1024,
++            async_scheduling=False,
++            enable_prefix_caching=False,
++            enable_chunked_prefill=False,
++        )
++        outputs = engine.generate(
++            [{"prompt_token_ids": ids} for ids in prompts],
++            SamplingParams(temperature=0, max_tokens=3, ignore_eos=True, logprobs=1),
++            use_tqdm=False,
++        )
++        for result, (tokens, probs) in zip(outputs, expected):
++            output = result.outputs[0]
++            assert list(output.token_ids) == tokens, (output.token_ids, tokens)
++            actual = [p[t].logprob for p, t in zip(output.logprobs, tokens)]
++            tolerance = 2e-3 if args.dtype == "float32" else 3e-2
++            torch.testing.assert_close(
++                torch.tensor(actual),
++                torch.tensor(probs),
++                atol=tolerance,
++                rtol=tolerance,
++            )
++        print(
++            f"PASS: features={args.features} sparse={args.sparse} "
++            f"ngram={args.ngram} routing={args.routing} active={args.active} "
++            f"state={args.state} causal={args.causal} dtype={args.dtype}; "
++            "prefill + 3 decode tokens, two requests"
++        )
++        engine.llm_engine.engine_core.shutdown()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/models/language/generation/test_mimir2_contracts.py b/tests/models/language/generation/test_mimir2_contracts.py
+new file mode 100644
+index 0000000000..51f983fabb
+--- /dev/null
++++ b/tests/models/language/generation/test_mimir2_contracts.py
+@@ -0,0 +1,250 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""CPU contracts; also runnable with unittest without the GPU test harness."""
++
++import unittest
++from types import SimpleNamespace
++
++import numpy as np
++import torch
++from transformers import Mimir2Config
++
++from vllm.model_executor.models.mimir2 import (
++    Mimir2ForCausalLM,
++    Mimir2ServingNGram,
++    pack_weights,
++    recurrence_steps,
++    validate_config,
++)
++from vllm.model_executor.models.mimir2_routing import (
++    prepare_ngram_windows,
++    prepare_sparse_mos_inputs,
++)
++
++
++class Mimir2Contracts(unittest.TestCase):
++    def test_ngram_windows_and_compiled_math(self):
++        from transformers.models.mimir2.modeling_mimir2 import Mimir2NGramMemory
++
++        config = Mimir2Config(
++            hidden_size=16,
++            num_attention_heads=2,
++            ngram_orders=[2, 3],
++            ngram_buckets=31,
++            ngram_heads=4,
++            ngram_contextual_gate=True,
++        )
++        native = Mimir2NGramMemory(config)
++        serving = Mimir2ServingNGram(config)
++        with torch.no_grad():
++            native.alpha.fill_(0.7)
++            for table in native.tables:
++                table.normal_(std=0.1)
++        serving.load_state_dict(native.state_dict(), strict=True)
++        compiled = torch.compile(serving, backend="aot_eager", fullgraph=True)
++        records = np.array([[1, 2, 3, 4, 5, 6], [11, 12, 13, 14, 15, 16]])
++        embeddings = torch.randn(2, 6, 16)
++        full = native(embeddings, torch.tensor(records), torch.arange(6))
++        # Unequal chunk lengths, decode, request reorder and slot replacement.
++        for order, starts, lengths in [
++            ([0, 1], [0, 0], [3, 2]),
++            ([1, 0], [2, 3], [1, 2]),
++            ([0, 1], [5, 3], [1, 3]),
++        ]:
++            batch = SimpleNamespace(
++                num_reqs=2,
++                token_ids_cpu=records[order],
++                is_token_ids=np.ones((2, 6), dtype=bool),
++                num_computed_tokens_cpu=np.array(starts),
++            )
++            bounds = np.array([0, lengths[0], sum(lengths)])
++            windows = prepare_ngram_windows(batch, bounds, sum(lengths) + 1, [2, 3])
++            x = torch.cat(
++                [
++                    embeddings[row, start : start + length]
++                    for row, start, length in zip(order, starts, lengths)
++                ]
++                + [torch.zeros(1, 16)]
++            )
++            expected = torch.cat(
++                [
++                    full[row, start : start + length]
++                    for row, start, length in zip(order, starts, lengths)
++                ]
++                + [torch.zeros(1, 16)]
++            )
++            torch.testing.assert_close(serving(x, windows), expected)
++            torch.testing.assert_close(compiled(x, windows), expected)
++        batch.num_computed_tokens_cpu[:] = 0
++        batch.token_ids_cpu[:] = 7
++        windows = prepare_ngram_windows(batch, [0, 1, 2], 2, [2, 3])
++        self.assertEqual(windows.tolist(), [[7, -1, -1], [7, -1, -1]])
++
++    def test_request_owned_routes(self):
++        batch = SimpleNamespace(
++            num_reqs=2,
++            num_prompt_tokens=np.array([2, 3]),
++            token_ids_cpu=np.array([[11, 12, 99], [21, 22, 23]]),
++            is_token_ids=np.ones((2, 3), dtype=bool),
++        )
++        inputs = prepare_sparse_mos_inputs(batch, [0, 1, 3], 4, "cpu", "prefix_mean")
++        self.assertEqual(inputs["mos_prompt_ids"].tolist(), [11, 12, 21, 22, 23])
++        self.assertEqual(inputs["mos_query_owners"].tolist(), [0, 1, 1, -1])
++        batch.token_ids_cpu = batch.token_ids_cpu[::-1].copy()
++        batch.num_prompt_tokens = batch.num_prompt_tokens[::-1].copy()
++        inputs = prepare_sparse_mos_inputs(batch, [0, 1, 2], 2, "cpu", "first_token")
++        self.assertEqual(inputs["mos_prompt_ids"].tolist(), [21, 11])
++        batch.token_ids_cpu[0, 0] = 42
++        inputs = prepare_sparse_mos_inputs(batch, [0, 1, 2], 2, "cpu", "first_token")
++        self.assertEqual(inputs["mos_prompt_ids"].tolist(), [42, 11])
++
++    def test_runner_stages_stable_ngram_buffer(self):
++        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
++
++        config = Mimir2Config(ngram_orders=[2, 3])
++        batch = SimpleNamespace(
++            num_reqs=2,
++            num_computed_tokens_cpu=np.array([0, 1]),
++            token_ids_cpu=np.array([[1, 2, 3], [9, 8, 7]]),
++            is_token_ids=np.ones((2, 3), dtype=bool),
++        )
++        runner = SimpleNamespace(
++            model_config=SimpleNamespace(hf_config=config),
++            max_num_tokens=8,
++            device="cpu",
++            is_pooling_model=False,
++            input_batch=batch,
++            query_start_loc=SimpleNamespace(np=np.array([0, 2, 3])),
++            get_model=lambda: SimpleNamespace(),
++            model=lambda **kwargs: kwargs["ngram_windows"],
++        )
++        GPUModelRunner._init_model_kwargs(runner)
++        address = runner.mimir2_ngram_windows.data_ptr()
++        GPUModelRunner._init_model_kwargs(runner)
++        self.assertEqual(address, runner.mimir2_ngram_windows.data_ptr())
++        windows = GPUModelRunner._model_forward(
++            runner,
++            input_ids=torch.tensor([1, 2, 8, 0]),
++            positions=torch.tensor([0, 1, 1, 0]),
++            intermediate_tensors=None,
++            inputs_embeds=None,
++        )
++        self.assertEqual(address, windows.data_ptr())
++        self.assertEqual(
++            windows.tolist(), [[1, -1, -1], [2, 1, -1], [8, 9, -1], [-1, -1, -1]]
++        )
++        batch.num_computed_tokens_cpu[:] = [2, 2]
++        runner.query_start_loc.np = np.array([0, 1, 2])
++        windows = GPUModelRunner._model_forward(
++            runner,
++            input_ids=torch.tensor([3, 7]),
++            positions=torch.tensor([2, 2]),
++            intermediate_tensors=None,
++            inputs_embeds=None,
++        )
++        self.assertEqual(address, windows.data_ptr())
++        self.assertEqual(windows.tolist(), [[3, 2, 1], [7, 8, 9]])
++
++    def test_ngram_strict_loader(self):
++        model = Mimir2ForCausalLM.__new__(Mimir2ForCausalLM)
++        torch.nn.Module.__init__(model)
++        model.config = Mimir2Config(
++            hidden_size=16,
++            num_attention_heads=2,
++            tie_word_embeddings=False,
++            ngram_orders=[2, 3],
++            ngram_buckets=31,
++            ngram_heads=4,
++            ngram_contextual_gate=True,
++        )
++        model.model = torch.nn.Module()
++        model.model.ngram = Mimir2ServingNGram(model.config)
++        model.lm_head = torch.nn.Linear(16, 32, bias=False)
++        weights = [(name, value.clone()) for name, value in model.state_dict().items()]
++        self.assertEqual(model.load_weights(weights), set(model.state_dict()))
++        for missing in (
++            "model.ngram.query.weight",
++            "model.ngram.key.weight",
++            "model.ngram.tables.7",
++            "model.ngram.alpha",
++        ):
++            with self.assertRaisesRegex(ValueError, "Incomplete"):
++                model.load_weights(
++                    [(key, value) for key, value in weights if key != missing]
++                )
++
++    def test_loader_requires_feature_buffers(self):
++        model = Mimir2ForCausalLM.__new__(Mimir2ForCausalLM)
++        torch.nn.Module.__init__(model)
++        model.config = SimpleNamespace(tie_word_embeddings=False)
++        model.model = torch.nn.Module()
++        model.model.register_buffer("gate_alpha", torch.tensor(0.0))
++        model.model.z_L_init = torch.nn.Parameter(torch.zeros(4))
++        model.lm_head = torch.nn.Linear(4, 8, bias=False)
++        weights = [
++            (name, value.clone() + 0.5) for name, value in model.state_dict().items()
++        ]
++        loaded = model.load_weights(weights)
++        self.assertEqual(loaded, set(model.state_dict()))
++        self.assertEqual(model.model.gate_alpha.item(), 0.5)
++        with self.assertRaisesRegex(ValueError, "gate_alpha"):
++            model.load_weights([(k, v) for k, v in weights if k != "model.gate_alpha"])
++
++    def test_cache_slots(self):
++        for experts in (1, 2, 4):
++            config = Mimir2Config(mos_num_experts=experts)
++            slots = recurrence_steps(config, "H")
++            for expert in range(experts):
++                slots += recurrence_steps(config, "L", expert)
++            self.assertEqual(sorted(slots), list(range(len(slots))))
++            self.assertEqual(
++                len(slots) * config.num_layers_per_stack, config.num_hidden_layers
++            )
++
++    def test_packing(self):
++        for prefix, projections, packed in (
++            ("model.L_module.layers.0.self_attn", ("gate", "q", "k", "v"), "gqkv"),
++            ("model.L_module.layers.0.mlp", ("gate", "up"), "gate_up"),
++            (
++                "model.L_module.stack_experts.0.layers.0.mlp.experts.1",
++                ("gate", "up"),
++                "gate_up",
++            ),
++        ):
++            tensors = [torch.full((2, 3), float(i)) for i in range(len(projections))]
++            weights = list(
++                zip([f"{prefix}.{p}_proj.weight" for p in projections], tensors)
++            )
++            result = dict(pack_weights(reversed(weights)))
++            torch.testing.assert_close(
++                result[f"{prefix}.{packed}_proj.weight"], torch.cat(tensors)
++            )
++            with self.assertRaisesRegex(ValueError, "Incomplete"):
++                list(pack_weights(weights[:-1]))
++            with self.assertRaisesRegex(ValueError, "Mixed"):
++                list(
++                    pack_weights(
++                        weights + [(f"{prefix}.{packed}_proj.weight", tensors[0])]
++                    )
++                )
++
++    def test_duplicate(self):
++        weights = [("model.gate_alpha", torch.tensor(0.5))] * 2
++        with self.assertRaisesRegex(ValueError, "Duplicate"):
++            list(pack_weights(weights))
++
++    def test_unsupported_features(self):
++        for fields in ({"ngram_orders": [2]},):
++            config = SimpleNamespace(
++                model_config=SimpleNamespace(hf_config=Mimir2Config(**fields)),
++                parallel_config=SimpleNamespace(pipeline_parallel_size=1),
++                scheduler_config=SimpleNamespace(async_scheduling=True),
++                quant_config=None,
++                speculative_config=None,
++            )
++            with self.assertRaises(ValueError):
++                validate_config(config)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/vllm/model_executor/models/mimir2.py b/vllm/model_executor/models/mimir2.py
+new file mode 100644
+index 0000000000..f965f881e3
+--- /dev/null
++++ b/vllm/model_executor/models/mimir2.py
+@@ -0,0 +1,525 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Mimir2 recurrent serving with request-owned attention caches.
++
++Small, cache-independent feature modules are shared with Transformers. Attention,
++linear layers and embedding/head projections use vLLM implementations.
++"""
++
++from collections.abc import Iterable
++
++import torch
++from torch import nn
++from transformers.models.mimir2.modeling_mimir2 import (
++    Mimir2InvocationGate,
++    Mimir2NGramMemory,
++    Mimir2RecurrentMemory,
++    Mimir2ResidualConnection,
++    Mimir2Router,
++)
++
++from vllm.compilation.decorators import support_torch_compile
++from vllm.config import VllmConfig
++from vllm.model_executor.layers.attention import Attention, PrefillPrefixLMAttention
++from vllm.model_executor.layers.layernorm import RMSNorm
++from vllm.model_executor.layers.logits_processor import LogitsProcessor
++from vllm.model_executor.layers.vocab_parallel_embedding import (
++    ParallelLMHead,
++    VocabParallelEmbedding,
++)
++from vllm.sequence import IntermediateTensors
++
++from .hrm_text import HrmTextAttention, HrmTextForCausalLM, HrmTextMLP
++from .utils import AutoWeightsLoader, maybe_prefix
++
++
++def recurrence_steps(config, level: str, expert: int = 0) -> list[int]:
++    stride = config.L_cycles * config.mos_num_experts + 1
++    if level == "H":
++        return [h * stride + stride - 1 for h in range(config.H_cycles)]
++    return [
++        h * stride + low_cycle * config.mos_num_experts + expert
++        for h in range(config.H_cycles)
++        for low_cycle in range(config.L_cycles)
++    ]
++
++
++def validate_config(vllm_config):
++    config = vllm_config.model_config.hf_config
++    if config.ngram_orders:
++        if vllm_config.scheduler_config.async_scheduling:
++            raise ValueError("Mimir2 n-grams require async_scheduling=False")
++        if getattr(vllm_config.parallel_config, "enable_dbo", False):
++            raise ValueError("Mimir2 n-grams do not support dual batch overlap")
++    if config.mos_sparse and not vllm_config.model_config.enforce_eager:
++        raise ValueError("Sparse MoS dynamic dispatch requires enforce_eager=True")
++    if vllm_config.parallel_config.pipeline_parallel_size != 1:
++        raise ValueError("Mimir2 pipeline parallelism is not supported")
++    if vllm_config.quant_config is not None:
++        raise ValueError("Mimir2 quantized loading has not been qualified")
++    if vllm_config.speculative_config is not None:
++        raise ValueError("Mimir2 speculative decoding is not supported")
++
++
++class Mimir2ServingNGram(Mimir2NGramMemory):
++    """One bounded causal window per scheduled token; no mutable graph state."""
++
++    def forward(self, hidden, windows):
++        output = torch.zeros_like(hidden)
++        hashes = [torch.zeros_like(windows[:, 0]) for _ in range(self.heads)]
++        valid = torch.ones_like(windows[:, 0], dtype=torch.bool)
++        for offset in range(max(self.orders)):
++            token = windows[:, offset]
++            valid = valid & (token >= 0)
++            hashes = [
++                (value * (65599 + 2 * head) + token + 1) % self.buckets
++                for head, value in enumerate(hashes)
++            ]
++            if offset + 1 in self.orders:
++                start = self.orders.index(offset + 1) * self.heads
++                retrieved = torch.cat(
++                    [
++                        torch.nn.functional.embedding(value, self.tables[start + head])
++                        for head, value in enumerate(hashes)
++                    ],
++                    dim=-1,
++                )
++                output = output + retrieved.to(hidden.dtype) * valid[:, None]
++        if self.contextual_gate:
++            context = torch.nn.functional.rms_norm(
++                hidden, (hidden.shape[-1],), eps=1e-6
++            )
++            memory = torch.nn.functional.rms_norm(output, (output.shape[-1],), eps=1e-6)
++            output = (
++                torch.sigmoid(self.query(context) + self.key(memory)).to(hidden.dtype)
++                * output
++            )
++        return hidden + self.alpha.to(hidden.dtype) * output
++
++
++def make_mlp(config, prefix):
++    return HrmTextMLP(
++        config.hidden_size,
++        config.intermediate_size,
++        config.hidden_act,
++        bias=config.mlp_bias,
++        prefix=prefix,
++    )
++
++
++class Mimir2MLPMixture(nn.Module):
++    """Dense reference execution of top-k routing (including sparse checkpoints)."""
++
++    def __init__(self, config, prefix):
++        super().__init__()
++        self.experts = nn.ModuleList(
++            make_mlp(config, f"{prefix}.experts.{i}")
++            for i in range(config.moe_num_experts)
++        )
++        self.router = Mimir2Router(config, config.moe_num_experts, config.moe_top_k)
++
++    def forward(self, hidden):
++        weights = self.router(hidden)
++        output = torch.zeros_like(hidden)
++        for i, expert in enumerate(self.experts):
++            candidate = expert(hidden)
++            output = output + weights[..., i : i + 1].to(candidate.dtype) * candidate
++        return output
++
++
++class Mimir2SparseAttention(HrmTextAttention):
++    """Sparse projections with full scheduler metadata for paged attention.
++
++    Inactive request KV slots receive zeros and are never read by that request:
++    its expert selection is fixed from the original prompt throughout decoding.
++    """
++
++    def forward(
++        self, positions, hidden_states, current_step, selected=None, total=None
++    ):
++        if selected is None:
++            return super().forward(positions, hidden_states, current_step)
++        gqkv, _ = self.gqkv_proj(hidden_states)
++        gate, query, key, value = gqkv.split(
++            [self.q_size, self.q_size, self.kv_size, self.kv_size], dim=-1
++        )
++        query, key = self.rotary_emb(positions, query, key)
++        full_query = query.new_zeros((total, query.shape[-1])).index_copy(
++            0, selected, query
++        )
++        full_key = key.new_zeros((total, key.shape[-1])).index_copy(0, selected, key)
++        full_value = value.new_zeros((total, value.shape[-1])).index_copy(
++            0, selected, value
++        )
++        attended = self.attn_per_step[str(current_step)](
++            full_query, full_key, full_value
++        )
++        output, _ = self.o_proj(
++            torch.sigmoid(gate) * attended.index_select(0, selected)
++        )
++        return output
++
++
++class Mimir2Layer(nn.Module):
++    def __init__(self, config, level, expert, index, cache_config, prefix):
++        super().__init__()
++        self.self_attn = Mimir2SparseAttention(
++            config,
++            index,
++            level,
++            cache_config=cache_config,
++            prefix=f"{prefix}.self_attn",
++            recurrence_steps=recurrence_steps(config, level, expert),
++            attention_cls=PrefillPrefixLMAttention if config.prefix_lm else Attention,
++            cache_prefix=prefix.split(f".{level}_module", 1)[0] + ".recurrence.layers",
++        )
++        self.mlp = (
++            Mimir2MLPMixture(config, f"{prefix}.mlp")
++            if config.moe_num_experts > 1 and config.moe_levels in (level, "both")
++            else make_mlp(config, f"{prefix}.mlp")
++        )
++        self.input_layernorm = RMSNorm(
++            config.hidden_size, eps=config.rms_norm_eps, has_weight=False
++        )
++        self.post_attention_layernorm = RMSNorm(
++            config.hidden_size, eps=config.rms_norm_eps, has_weight=False
++        )
++        if config.residual_branches > 1 and config.residual_levels in (level, "both"):
++            for offset, name in enumerate(("attn_residual", "mlp_residual")):
++                setattr(
++                    self,
++                    name,
++                    Mimir2ResidualConnection(
++                        config.residual_branches,
++                        config.hidden_size,
++                        2 * index + offset,
++                        config.residual_write_init_scale,
++                        config.residual_input_dependent,
++                    ),
++                )
++
++    def forward(self, positions, hidden, step, alpha=None, selected=None, total=None):
++        if alpha is None:
++            hidden = hidden + self.self_attn(
++                positions, self.input_layernorm(hidden), step, selected, total
++            )
++            return hidden + self.mlp(self.post_attention_layernorm(hidden))
++        read = self.input_layernorm(self.attn_residual.read(hidden, alpha))
++        hidden = self.attn_residual.write(
++            hidden, self.self_attn(positions, read, step, selected, total), alpha
++        )
++        read = self.post_attention_layernorm(self.mlp_residual.read(hidden, alpha))
++        return self.mlp_residual.write(hidden, self.mlp(read), alpha)
++
++
++class Mimir2Stack(nn.Module):
++    def __init__(self, config, level, cache_config, prefix, expert=0):
++        super().__init__()
++        self.branches = (
++            config.residual_branches if config.residual_levels in (level, "both") else 1
++        )
++        self.layers = nn.ModuleList(
++            Mimir2Layer(config, level, expert, i, cache_config, f"{prefix}.layers.{i}")
++            for i in range(config.num_layers_per_stack)
++        )
++        self.final_norm = RMSNorm(
++            config.hidden_size, eps=config.rms_norm_eps, has_weight=False
++        )
++        if self.branches > 1:
++            self.residual_readout = nn.Parameter(
++                torch.zeros(self.branches, config.hidden_size)
++            )
++            self.register_buffer("residual_alpha", torch.tensor(config.residual_alpha))
++
++    def forward(self, positions, hidden, step, selected=None, total=None):
++        if self.branches == 1:
++            for layer in self.layers:
++                hidden = layer(positions, hidden, step, selected=selected, total=total)
++            return self.final_norm(hidden)
++        streams = hidden.unsqueeze(-2).expand(
++            *hidden.shape[:-1], self.branches, hidden.shape[-1]
++        )
++        for layer in self.layers:
++            streams = layer(
++                positions, streams, step, self.residual_alpha, selected, total
++            )
++        weights = (self.residual_alpha.float() * self.residual_readout.float()).softmax(
++            0
++        )
++        return self.final_norm((streams.float() * weights).sum(-2).to(hidden.dtype))
++
++
++@support_torch_compile
++class Mimir2Model(nn.Module):
++    def __init__(self, *, vllm_config: VllmConfig, prefix=""):
++        super().__init__()
++        config = self.config = vllm_config.model_config.hf_config
++        self.embed_tokens = VocabParallelEmbedding(
++            config.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
++        )
++        if config.ngram_orders:
++            self.ngram = Mimir2ServingNGram(config)
++        self.embedding_scale = config.embedding_scale
++        if self.embedding_scale is None:
++            self.embedding_scale = 1 / config.initializer_range
++        self.z_L_init = nn.Parameter(
++            torch.zeros(config.hidden_size), requires_grad=False
++        )
++        for level in ("L", "H"):
++            stack = Mimir2Stack(
++                config, level, vllm_config.cache_config, f"{prefix}.{level}_module"
++            )
++            setattr(self, f"{level}_module", stack)
++            if config.gates_enabled:
++                count = config.H_cycles * (config.L_cycles if level == "L" else 1)
++                stack.invocation_gates = nn.ModuleList(
++                    Mimir2InvocationGate(config.hidden_size) for _ in range(count)
++                )
++            count = (
++                config.l_memory_branches if level == "L" else config.h_memory_branches
++            )
++            if count > 1:
++                stack.memory = Mimir2RecurrentMemory(
++                    count, config.hidden_size, config.memory_alpha
++                )
++        if config.gates_enabled:
++            self.register_buffer("gate_alpha", torch.tensor(config.gate_alpha))
++        if config.mos_num_experts > 1:
++            self.L_module.stack_experts = nn.ModuleList(
++                Mimir2Stack(
++                    config,
++                    "L",
++                    vllm_config.cache_config,
++                    f"{prefix}.L_module.stack_experts.{i}",
++                    expert=i + 1,
++                )
++                for i in range(config.mos_num_experts - 1)
++            )
++            self.L_module.stack_router = Mimir2Router(
++                config, config.mos_num_experts, config.mos_top_k
++            )
++
++    def embed_input_ids(self, input_ids):
++        return self.embed_tokens(input_ids) * self.embedding_scale
++
++    def _injection(self, stack, invocation, hidden, injection):
++        if not self.config.gates_enabled:
++            return injection
++        return stack.invocation_gates[invocation](hidden, injection, self.gate_alpha)
++
++    def forward(
++        self,
++        input_ids: torch.Tensor | None,
++        positions: torch.Tensor,
++        intermediate_tensors: IntermediateTensors | None = None,
++        inputs_embeds: torch.Tensor | None = None,
++        ngram_windows: torch.Tensor | None = None,
++        mos_prompt_ids: torch.Tensor | None = None,
++        mos_prompt_owners: torch.Tensor | None = None,
++        mos_prompt_counts: torch.Tensor | None = None,
++        mos_query_owners: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        high = (
++            self.embed_input_ids(input_ids) if inputs_embeds is None else inputs_embeds
++        )
++        if self.config.ngram_orders:
++            if inputs_embeds is not None or ngram_windows is None:
++                raise ValueError(
++                    "Mimir2 n-grams require scheduler token windows and token IDs"
++                )
++            high = self.ngram(high, ngram_windows)
++        low = self.z_L_init.to(high).expand_as(high)
++        memories = {}
++        for name, value in (("H", high), ("L", low)):
++            stack = getattr(self, f"{name}_module")
++            if hasattr(stack, "memory"):
++                memories[name] = stack.memory.initialize(value)
++        experts = [self.L_module, *getattr(self.L_module, "stack_experts", [])]
++        routes = None
++        if self.config.mos_sparse and len(experts) > 1:
++            if mos_prompt_ids is None:
++                from vllm.forward_context import get_forward_context
++
++                if get_forward_context().attn_metadata is not None:
++                    raise ValueError(
++                        "Sparse MoS requires runner-provided request prompt metadata"
++                    )
++                # Profile every expert on all dummy tokens to bound memory.
++                routes = high.new_full((high.shape[0], len(experts)), 1 / len(experts))
++            else:
++                embeddings = self.embed_input_ids(mos_prompt_ids)
++                pooled = embeddings.new_zeros(
++                    (mos_prompt_counts.shape[0], embeddings.shape[-1]),
++                    dtype=torch.float32,
++                )
++                pooled.index_add_(0, mos_prompt_owners, embeddings.float())
++                pooled = (pooled / mos_prompt_counts[:, None]).to(embeddings.dtype)
++                request_routes = self.L_module.stack_router(pooled)
++                routes = request_routes[mos_query_owners.clamp_min(0)]
++                routes = routes * (mos_query_owners >= 0)[:, None]
++        states = (
++            [low] * len(experts) if self.config.mos_state_mode == "separate" else None
++        )
++        step = 0
++        for h in range(self.config.H_cycles):
++            for low_cycle in range(self.config.L_cycles):
++                if "L" in memories:
++                    low = self.L_module.memory.read_state(memories["L"])
++                weights = (
++                    routes
++                    if routes is not None
++                    else (
++                        self.L_module.stack_router(low + high)
++                        if len(experts) > 1
++                        else None
++                    )
++                )
++                output, next_states = torch.zeros_like(high), []
++                for e, expert in enumerate(experts):
++                    previous = low if states is None else states[e]
++                    combined = previous + self._injection(
++                        self.L_module,
++                        h * self.config.L_cycles + low_cycle,
++                        previous,
++                        high,
++                    )
++                    if routes is None:
++                        candidate = expert(positions, combined, step)
++                    else:
++                        selected = (routes[:, e] != 0).nonzero().flatten()
++                        candidate = torch.zeros_like(combined)
++                        if selected.numel():
++                            values = expert(
++                                positions.index_select(0, selected),
++                                combined.index_select(0, selected),
++                                step,
++                                selected=selected,
++                                total=high.shape[0],
++                            )
++                            candidate.index_copy_(0, selected, values)
++                    step += 1
++                    weight = weights[..., e : e + 1] if weights is not None else None
++                    output = output + (
++                        weight.to(candidate.dtype) * candidate
++                        if weight is not None
++                        else candidate
++                    )
++                    if states is not None:
++                        next_states.append(
++                            torch.where(weight > 0, candidate, previous)
++                            if weight is not None
++                            else candidate
++                        )
++                low = output
++                states = next_states if states is not None else None
++                if "L" in memories:
++                    memories["L"] = self.L_module.memory.update(memories["L"], low)
++                    low = self.L_module.memory.read_state(memories["L"])
++            if "H" in memories:
++                high = self.H_module.memory.read_state(memories["H"])
++            high = self.H_module(
++                positions, high + self._injection(self.H_module, h, high, low), step
++            )
++            step += 1
++            if "H" in memories:
++                memories["H"] = self.H_module.memory.update(memories["H"], high)
++                high = self.H_module.memory.read_state(memories["H"])
++        return high
++
++
++def pack_weights(weights: Iterable[tuple[str, torch.Tensor]]):
++    """Pack split HF projections, refusing incomplete or mixed representations."""
++    groups = {}
++    seen = set()
++    for name, tensor in weights:
++        name = name.replace(".attn.", ".self_attn.")
++        if name in seen:
++            raise ValueError(f"Duplicate weight: {name}")
++        seen.add(name)
++        parts = name.split(".")
++        projection = parts[-2] if len(parts) > 1 else ""
++        attention = ".self_attn." in name or ".attn." in name
++        layout = (
++            ("gate_proj", "q_proj", "k_proj", "v_proj")
++            if attention
++            else ("gate_proj", "up_proj")
++        )
++        if projection in layout:
++            parts[-2] = "gqkv_proj" if attention else "gate_up_proj"
++            packed_name = ".".join(parts).replace(".attn.", ".self_attn.")
++            entry = groups.setdefault(packed_name, ({}, layout))
++            entry[0][projection] = tensor
++        else:
++            yield name, tensor
++    for name, (tensors, layout) in groups.items():
++        if name in seen or name.replace(".self_attn.", ".attn.") in seen:
++            raise ValueError(f"Mixed packed and split weights: {name}")
++        if set(tensors) != set(layout):
++            raise ValueError(f"Incomplete projection: {name}; got {sorted(tensors)}")
++        yield name, torch.cat([tensors[key] for key in layout], dim=0)
++
++
++class Mimir2ForCausalLM(HrmTextForCausalLM):
++    def prepare_sparse_mos_inputs(
++        self, input_batch, query_start_loc, num_tokens, device
++    ):
++        if not self.config.mos_sparse:
++            return {}
++        from .mimir2_routing import prepare_sparse_mos_inputs
++
++        return prepare_sparse_mos_inputs(
++            input_batch,
++            query_start_loc,
++            num_tokens,
++            device,
++            self.config.mos_sparse_routing,
++        )
++
++    def forward(
++        self,
++        input_ids,
++        positions,
++        intermediate_tensors=None,
++        inputs_embeds=None,
++        **kwargs,
++    ):
++        return self.model(
++            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
++        )
++
++    def __init__(self, *, vllm_config: VllmConfig, prefix=""):
++        nn.Module.__init__(self)
++        validate_config(vllm_config)
++        self.config = vllm_config.model_config.hf_config
++        self.quant_config = None
++        self.model = Mimir2Model(
++            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
++        )
++        self.lm_head = (
++            self.model.embed_tokens
++            if self.config.tie_word_embeddings
++            else ParallelLMHead(
++                self.config.vocab_size,
++                self.config.hidden_size,
++                prefix=maybe_prefix(prefix, "lm_head"),
++            )
++        )
++        self.logits_processor = LogitsProcessor(self.config.vocab_size)
++
++    def load_weights(self, weights):
++        skip = ["lm_head."] if self.config.tie_word_embeddings else None
++        loaded = AutoWeightsLoader(self, skip_prefixes=skip).load_weights(
++            pack_weights(weights), mapper=self.hf_to_vllm_mapper
++        )
++        expected = set(dict(self.named_parameters()))
++        expected.update(
++            f"{name}.{key}" if name else key
++            for name, module in self.named_modules()
++            if not isinstance(module, Attention)
++            for key, value in module._buffers.items()
++            if value is not None and key not in module._non_persistent_buffers_set
++        )
++        missing = expected - loaded
++        if missing:
++            raise ValueError(f"Incomplete Mimir2 checkpoint: {sorted(missing)}")
++        return loaded
+diff --git a/vllm/model_executor/models/mimir2_routing.py b/vllm/model_executor/models/mimir2_routing.py
+new file mode 100644
+index 0000000000..0bea9166bd
+--- /dev/null
++++ b/vllm/model_executor/models/mimir2_routing.py
+@@ -0,0 +1,56 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Request-owned sparse MoS inputs, rebuilt from the scheduler's prompt records."""
++
++import torch
++
++
++def prepare_sparse_mos_inputs(input_batch, query_start_loc, num_tokens, device, policy):
++    tokens, owners, counts, queries = [], [], [], []
++    for row in range(input_batch.num_reqs):
++        length = int(input_batch.num_prompt_tokens[row])
++        if length < 1:
++            raise ValueError("Sparse MoS requires a nonempty tokenized prompt")
++        length = 1 if policy == "first_token" else length
++        if not input_batch.is_token_ids[row, :length].all():
++            raise ValueError("Sparse MoS routing requires prompt token IDs")
++        tokens.extend(input_batch.token_ids_cpu[row, :length].tolist())
++        owners.extend([row] * length)
++        counts.append(length)
++        queries.extend([row] * int(query_start_loc[row + 1] - query_start_loc[row]))
++    if len(queries) > num_tokens:
++        raise ValueError("Sparse MoS request boundaries exceed the scheduled batch")
++    queries.extend([-1] * (num_tokens - len(queries)))
++    return {
++        "mos_prompt_ids": torch.tensor(tokens, dtype=torch.long, device=device),
++        "mos_prompt_owners": torch.tensor(owners, dtype=torch.long, device=device),
++        "mos_prompt_counts": torch.tensor(counts, dtype=torch.long, device=device),
++        "mos_query_owners": torch.tensor(queries, dtype=torch.long, device=device),
++    }
++
++
++def prepare_ngram_windows(input_batch, query_start_loc, num_tokens, orders):
++    """Newest-first windows from synchronous scheduler records, bounded by batch.
++
++    Rebuild from request-owned records so reorder, chunking and preemption do
++    not transfer history between slots. -1 marks context before request start.
++    """
++    import numpy as np
++
++    width = max(orders)
++    result = np.full((num_tokens, width), -1, dtype=np.int64)
++    for row in range(input_batch.num_reqs):
++        start, end = map(int, query_start_loc[row : row + 2])
++        computed = int(input_batch.num_computed_tokens_cpu[row])
++        if end > num_tokens or start < 0 or end < start:
++            raise ValueError("N-gram request boundaries exceed scheduled batch")
++        for offset in range(width):
++            positions = np.arange(computed, computed + end - start) - offset
++            valid = positions >= 0
++            indices = positions[valid]
++            if not input_batch.is_token_ids[row, indices].all():
++                raise ValueError(
++                    "Mimir2 n-grams require token IDs, not prompt embeddings"
++                )
++            result[start:end, offset][valid] = input_batch.token_ids_cpu[row, indices]
++    return torch.from_numpy(result)

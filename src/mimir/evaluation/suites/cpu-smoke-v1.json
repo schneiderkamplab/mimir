@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "tasks": [
+    {
+      "id": "next-token",
+      "backend": "cpu_fixture",
+      "examples": [
+        {
+          "input_ids": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "input_ids": [
+            4,
+            3,
+            2,
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

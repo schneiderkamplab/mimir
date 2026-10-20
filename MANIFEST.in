@@ -1,0 +1,10 @@
+include AGENTS.md NOTICE LICENSE README.md uv.lock
+recursive-include patches *.patch
+recursive-include provenance *.json
+recursive-include wiki *.md
+recursive-include tools *.py
+recursive-include scripts *.py
+recursive-include qualification *.json
+recursive-include tests *.py *.yaml
+
+recursive-include licenses *.txt

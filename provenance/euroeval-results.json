@@ -1,0 +1,53 @@
+{
+  "source_sha256": "1d182a36603629e73f1dd83c5a6ada879c273da046fc64d7b2faff8cef38411a",
+  "records": [
+    {
+      "dataset": "angry-tweets",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:35:49.394452+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_macro_f1"
+      ]
+    },
+    {
+      "dataset": "dala",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:44:42.197486+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_macro_f1"
+      ]
+    },
+    {
+      "dataset": "danish-citizen-tests",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:45:42.375455+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_accuracy"
+      ]
+    },
+    {
+      "dataset": "danske-talemaader",
+      "version": "17.7.0",
+      "few_shot": true,
+      "split": "test",
+      "passes": 1,
+      "timestamp": "2026-08-04T18:48:02.908270+00:00",
+      "metrics": [
+        "test_mcc",
+        "test_accuracy"
+      ]
+    }
+  ]
+}

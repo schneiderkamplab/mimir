@@ -1,0 +1,20 @@
+{
+  "custom_english_tasks.py": "ac8a4c66d6416bedeedb698f9d4621d5b2c35e8c1528bcad40c5057124f4a3cb",
+  "custom_english_tasks_ie_prompts.py": "fac282dd182f5bc6d47c05ad863e41c032c12f09764362704471b61691cc4619",
+  "hellaswag_ie_fmt_task.py": "981a0f9cf6afbf8f79bb889c79cbbad0bbb4af723cd8b56965f0397664e3aff8",
+  "mmlu_winogrande_tasks.py": "08b031b5f26196d7e2f64c21dfac9444d6fc37a38c7712a19f63ce1a111c866b",
+  "math_humaneval_tasks.py": "5d2d622c6bb127aa8abfa4bda8292cfe1b17642452be0f3c1f5a338658aa2342",
+  "nordjylland_news_summarization.py": "6b2147edf62993c48bd0134178641c7cdd9cf50f6c45ec7ea9745c132e6eb66f",
+  "custom_wmt24pp.py": "42a2010f5865da758de485d39963d8628888a72ee8f7f04541c79ae67d3dedfd",
+  "hellaswag_da.py": "7971cc9caf8a76c098eddced730c7dae3501f8df24838c697724d9916635c317",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/angry_tweets.py": "234010c10ae4fd811f5d34a8d3bd376d20fd3c3924b13916e99fb88edd3e78ea",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/dala.py": "9e5831fad23d3417bd0975463d80b67dd17f51f94dc7247c8cab0b597d71504c",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/gec_dala.py": "cb81d33f6d523bc2df3107733949f18fba0784040704c0c36e343e214b420541",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/piqa.py": "f875b9066483afe75f5b5aa0169a4c9356e2ab651c1fdb999adf4e0cec32b0bd",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/daisy.py": "7fe3c32d50fd266356c3543dbd12a1a17288007545fc83d6e53b362689d95a2e",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/multi_wiki_qa.py": "acd3bc3cff764cd82d03067a8b381e84596fffba24d5ad85909175fc1fd531e3",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/wmt24pp.py": "c1cb0c8e65d4887d514d84c98b75922015a7bcdcd4a52a2917f11a9c7c83f834",
+  "runs/ouro_full_20260925/sources/dfm_evals/tasks/ifeval_da.py": "0b3e089d3c21db9114f0c58ff9371de0eb3b1e459554cab41ad2ce22abfd2b04",
+  "runs/ouro_full_20260925/sources/dfm_evals/scorers/chrf.py": "ff26ff30511ea20ca888ca0e08c53b2166573d045a204f77a7b8e6c43af5033a",
+  "custom_andersen_modernize.py": "8a7b0d9046b3008b78a52f6eb65a5eb83e1f159c234a3840ee80d213ad5d07d3"
+}
