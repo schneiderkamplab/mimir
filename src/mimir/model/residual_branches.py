@@ -1,7 +1,7 @@
 """Opt-in multi-stream residuals for v2 pre-norm transformer stacks.
 
 Read a normalized mixture, execute each sublayer once, and distribute its
-update across streams. Streams exist within a stack call, not across calls.
+update across streams. The caller can optionally retain streams across calls.
 """
 
 import torch
@@ -90,19 +90,66 @@ class BranchedTransformer(Transformer):
         self.residual_readout = nn.Parameter(torch.zeros(branches, hidden_size))
         self.register_buffer('residual_alpha', torch.tensor(0.0))
 
-    def forward(self, x, cache=None, stability_diagnostics=None, stability_scope=None, **seq_info):
+    def initialize_streams(self, x):
+        return x.unsqueeze(-2).expand(*x.shape[:-1], self.branches, x.shape[-1])
+
+    def process_streams(self, streams, cache=None, stability_diagnostics=None,
+                        stability_scope=None, **seq_info):
         if stability_diagnostics is not None and stability_scope is None:
             raise ValueError("stability_scope is required when diagnostics are enabled")
         seq_info['cos_sin'] = self.rotary_emb(seq_info.pop('position_ids', None)) if hasattr(self, 'rotary_emb') else None
-        streams = x.unsqueeze(-2).expand(*x.shape[:-1], self.branches, x.shape[-1])
         for index, layer in enumerate(self.layers):
             streams = layer(streams, residual_alpha=self.residual_alpha, **seq_info,
                             cache=cache[index] if cache is not None else None,
                             stability_diagnostics=stability_diagnostics,
                             stability_scope=f"{stability_scope}/layer_{index:03d}" if stability_scope else None)
+        return streams
+
+    def readout(self, streams, stability_diagnostics=None, stability_scope=None):
         weights = (self.residual_alpha.float() * self.residual_readout.float()).softmax(dim=0)
-        output = self.norm_f((streams.float() * weights).sum(dim=-2).to(x.dtype))
+        output = self.norm_f((streams.float() * weights).sum(dim=-2).to(streams.dtype))
         if stability_diagnostics is not None:
             stability_diagnostics.record_tensor(
                 f"activation/{stability_scope}/final_norm", output, record_gradient=True)
         return output
+
+    def forward(self, x, cache=None, stability_diagnostics=None, stability_scope=None,
+                stream_input=False, return_streams=False, **seq_info):
+        # Keep parameter access inside __call__ for recurrent-level FSDP hooks.
+        streams = x if stream_input else self.initialize_streams(x)
+        streams = self.process_streams(streams, cache=cache, stability_diagnostics=stability_diagnostics,
+                                       stability_scope=stability_scope, **seq_info)
+        output = self.readout(streams, stability_diagnostics, stability_scope)
+        return (streams, output) if return_streams else output
+
+
+class BranchExpertMixer(nn.Module):
+    """Reweight the selected MoS experts independently for each H branch.
+
+    Zero logits reproduce the router weights. Routing support is unchanged;
+    with top-1 all branches necessarily receive the same expert output.
+    """
+    def __init__(self, branches, experts, init_scale=0.1):
+        super().__init__()
+        # Copied MoS experts start identical. A small deterministic preference
+        # prevents the new mixer from locking them into symmetric gradients.
+        logits = torch.full((branches, experts), -init_scale / experts)
+        logits[torch.arange(branches), torch.arange(branches) % experts] += init_scale
+        self.logits = nn.Parameter(logits)
+
+    def forward(self, expert_outputs):
+        # Entries are full-token expert candidates and scalar routing weights.
+        values = torch.stack([value for value, _ in expert_outputs], dim=-2)
+        weights = torch.cat([weight.expand(*values.shape[:-2], 1)
+                             for _, weight in expert_outputs], dim=-1).float()
+        # Stable masked softmax of log(router weight) + branch preference.
+        active = weights > 0
+        logits = self.logits.float().expand(*weights.shape[:-1], *self.logits.shape)
+        shift = logits.masked_fill(~active.unsqueeze(-2), -torch.inf).amax(-1, keepdim=True)
+        preference = (logits - shift).masked_fill(~active.unsqueeze(-2), -torch.inf).exp()
+        mixture = weights.unsqueeze(-2) * preference
+        mixture = mixture / mixture.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+        # Preserve the router's selected-entry straight-through derivative for
+        # top-1: forward routing mass is one, but its surrogate gradient is not.
+        mixture = mixture * weights.sum(-1)[..., None, None]
+        return torch.einsum('...be,...ed->...bd', mixture, values.float()).to(values.dtype)

@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-21",
+  "device": "cpu",
+  "full_suite": {
+    "passed": 288,
+    "subtests_passed": 25,
+    "warnings": 28
+  },
+  "new_tests": 36,
+  "installation": "rebuilt wheel in isolated environment",
+  "campaign": {
+    "status": "passed",
+    "device": "cpu",
+    "steps": 4,
+    "split_step": 2,
+    "features": [
+      "persistent H streams",
+      "branch-specific L mixing",
+      "H MoE",
+      "L MoS",
+      "automatic LR"
+    ],
+    "exact": [
+      "model",
+      "optimizer",
+      "EMA",
+      "RNG",
+      "logged losses/LRs"
+    ]
+  },
+  "limits": [
+    "new features not implemented in Transformers/vLLM exports",
+    "CUDA/FA4 and GPU FSDP2 qualification pending"
+  ]
+}

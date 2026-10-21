@@ -15,7 +15,7 @@ from mimir.model.recurrence import (
 )
 from mimir.model.module_learning_rates import backward_call_counts
 from mimir.model.expert_mixtures import TopKRouter, install_mlp_mixtures
-from mimir.model.residual_branches import BranchedTransformer
+from mimir.model.residual_branches import BranchedTransformer, BranchExpertMixer
 from mimir.model.recurrent_memory import RecurrentMemory
 from mimir.model.ngram_memory import NGramMemory
 
@@ -42,6 +42,8 @@ class Mimir2Config(BaselineConfig):
     residual_warmup_steps: int = Field(default=0, ge=0)
     residual_write_init_scale: float = Field(default=0.1, ge=0)
     residual_input_dependent: bool = False
+    h_residual_persistence: bool = False
+    h_branch_l_mixing: bool = False
     upcycle_from_dense: bool = False
     moe_sparse: bool = False
     mos_sparse: bool = False
@@ -70,6 +72,16 @@ class Mimir2Config(BaselineConfig):
             raise ValueError("L requires positive layers and H requires nonnegative layers")
         if h_layers == 0 and self.recurrence_mode != "looped":
             raise ValueError("Zero-layer H requires looped recurrence")
+        if self.h_residual_persistence or self.h_branch_l_mixing:
+            if (self.recurrence_mode != "hierarchical" or h_layers == 0
+                    or self.residual_branches < 2 or self.residual_levels not in ("H", "both")):
+                raise ValueError("H stream options require hierarchical recurrence and multiple H residual branches")
+            if self.h_memory_branches > 1:
+                raise ValueError("H stream options cannot be combined with H recurrent memory")
+            if self.gate_initialize_from_v1:
+                raise ValueError("H stream options require explicit upcycling, not gate-only migration")
+        if self.h_branch_l_mixing and (self.mos_num_experts < 2 or self.l_memory_branches > 1):
+            raise ValueError("Branch-specific L mixing requires MoS and no L recurrent memory")
         if self.recurrence_mode == "looped" and (
             self.gates_enabled or self.h_memory_branches > 1 or self.l_memory_branches > 1
             or self.mos_state_mode != "shared"
@@ -147,6 +159,8 @@ class Mimir2(Baseline):
                 level.core = BranchedTransformer(level.core, config.residual_branches,
                                                  config.residual_write_init_scale, config.residual_input_dependent)
                 level.create_cache = level.core.create_cache
+        if config.h_branch_l_mixing:
+            self.H_level.l_branch_mixer = BranchExpertMixer(config.residual_branches, config.mos_num_experts)
         if config.mos_num_experts > 1:
             self.L_level.stack_experts = nn.ModuleList(
                 copy.deepcopy(self.L_level.core) for _ in range(config.mos_num_experts - 1)
@@ -177,7 +191,8 @@ class Mimir2(Baseline):
             self._attention_create_cache = self.create_cache
             self.create_cache = self._create_ngram_cache
         if (config.ngram_orders or config.h_memory_branches > 1 or config.l_memory_branches > 1
-                or config.moe_sparse or config.mos_sparse or config.residual_input_dependent):
+                or config.moe_sparse or config.mos_sparse or config.residual_input_dependent
+                or config.h_residual_persistence or config.h_branch_l_mixing):
             from mimir.model.transformer import TransformerBlock
             for module in self.modules():
                 if isinstance(module, TransformerBlock):
@@ -208,7 +223,7 @@ class Mimir2(Baseline):
             return other
         return level.invocation_gates[invocation](hidden, other, self.gate_alpha)
 
-    def _stack_step(self, z_L, z_H, states, invocation, cache, diagnostics, seq_info, bias=None):
+    def _stack_step(self, z_L, z_H, states, invocation, cache, diagnostics, seq_info, bias=None, expert_outputs=None):
         # Route token-locally, but run each attention stack on complete sequences.
         # This mixes full-context outputs; it never prunes tokens from attention.
         weights = self.L_level.stack_router(z_L + z_H, bias)
@@ -223,6 +238,8 @@ class Mimir2(Baseline):
                      stability_scope=f"L/cycle_{invocation:03d}/expert_{index}" if diagnostics is not None else None)
             weight = weights[..., index:index + 1]
             output = output + weight.to(y.dtype) * y
+            if expert_outputs is not None:
+                expert_outputs.append((y, weight))
             if states is not None:
                 # Inactive states are held, even though their candidate outputs
                 # are computed to keep caches and distributed execution coherent.
@@ -241,6 +258,8 @@ class Mimir2(Baseline):
             return super().forward(carry, x, cache=cache, bp_steps=bp_steps,
                                    stability_diagnostics=stability_diagnostics, **seq_info)
         z_H, z_L = x, self.zL_init
+        h_streams = (self.H_level.core.initialize_streams(x)
+                     if self.gate_config.h_residual_persistence else None)
         memories = {}
         for name, value in (('H', z_H), ('L', z_L)):
             memory = getattr(getattr(self, f'{name}_level'), 'memory', None)
@@ -269,7 +288,10 @@ class Mimir2(Baseline):
             if looped:
                 z_L = z_H
             l_context = torch.zeros_like(z_H) if looped else z_H
+            expert_outputs = None
             for k in range(i * self.L_cycles, (i + 1) * self.L_cycles):
+                expert_outputs = ([] if self.gate_config.h_branch_l_mixing
+                                  and k == (i + 1) * self.L_cycles - 1 else None)
                 with torch.set_grad_enabled(torch.is_grad_enabled() and k >= self.H_cycles * self.L_cycles - l_bp):
                     if 'L' in memories:
                         z_L = self.L_level.memory.read_state(memories['L'])
@@ -278,14 +300,14 @@ class Mimir2(Baseline):
                             if cache is not None or x.ndim == 3:
                                 z_L, states = batched_sparse_stack_step(
                                     self, z_L, l_context, states, k, stability_diagnostics, level_info['L'], routes,
-                                    cache['L'][k] if cache is not None else None)
+                                    cache['L'][k] if cache is not None else None, expert_outputs=expert_outputs)
                             else:
                                 z_L, states = sparse_stack_step(self, z_L, l_context, states, k,
-                                                               stability_diagnostics, level_info['L'], routes)
+                                                               stability_diagnostics, level_info['L'], routes, expert_outputs=expert_outputs)
                         else:
                             z_L, states = self._stack_step(
                                 z_L, l_context, states, k, cache['L'][k] if cache is not None else None,
-                                stability_diagnostics, level_info['L'], mos_bias)
+                                stability_diagnostics, level_info['L'], mos_bias, expert_outputs=expert_outputs)
                     else:
                         injection = self._inject(self.L_level, k, z_L, l_context)
                         z_L = self.L_level(
@@ -305,6 +327,18 @@ class Mimir2(Baseline):
                     z_H = self.H_level.memory.read_state(memories['H'])
                 if looped:
                     z_H = z_L
+                if self.gate_config.h_residual_persistence or self.gate_config.h_branch_l_mixing:
+                    if not self.gate_config.h_residual_persistence:
+                        h_streams = self.H_level.core.initialize_streams(z_H)
+                    l_injection = (self.H_level.l_branch_mixer(expert_outputs)
+                                   if self.gate_config.h_branch_l_mixing else z_L.unsqueeze(-2))
+                    injection = self._inject(self.H_level, i, h_streams, l_injection)
+                    h_streams, z_H = self.H_level(
+                        h_streams, injection, **level_info['H'], stream_input=True, return_streams=True,
+                        cache=cache["H"][i] if cache is not None else None,
+                        stability_diagnostics=stability_diagnostics,
+                        stability_scope=f"H/cycle_{i:03d}" if stability_diagnostics is not None else None)
+                    continue
                 injection = (torch.zeros_like(z_L) if looped else
                              self._inject(self.H_level, i, z_H, z_L))
                 z_H = self.H_level(

@@ -75,7 +75,7 @@ class RecurrentBlock(nn.Module):
         )
         if stability_diagnostics is not None:
             stability_diagnostics.record_tensor(
-                f"recurrent/{stability_scope}/output", output, record_gradient=True
+                f"recurrent/{stability_scope}/output", output[1] if isinstance(output, tuple) else output, record_gradient=True
             )
         return output
 

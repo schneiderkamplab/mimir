@@ -17,6 +17,8 @@ def export(checkpoint, output, tokenizer, *, ema=True):
     if cfg['arch']['name']!='mimir2':raise ValueError('Only Mimir2 exports are supported')
     if cfg['arch'].get('recurrence_mode', 'hierarchical') != 'hierarchical':
         raise ValueError('Looped recurrence export is not supported by the pinned inference forks')
+    if cfg['arch'].get('h_residual_persistence') or cfg['arch'].get('h_branch_l_mixing'):
+        raise ValueError('Persistent H streams and branch-specific L mixing require inference fork support')
     from transformers.models.mimir2.convert_mimir2_weights_to_hf import convert_checkpoint
     from transformers import AutoTokenizer, AutoModelForCausalLM
     tag=manifest['tag']

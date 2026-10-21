@@ -86,3 +86,21 @@ the 73 recurrence and module-learning-rate tests were rerun for that correction.
 See [recurrence options](recurrence-options.md) and the receipt under
 `qualification/recurrence.json`. New GPU/distributed recurrence qualification
 and looped Transformers/vLLM integration remain outstanding.
+
+
+## Persistent H and branch-specific injection (2026-10-21)
+
+The rebuilt wheel passed 288 CPU tests and 25 subtests (28 warnings), including
+36 new tests. The new coverage includes two-rank Gloo DDP, dense static-shape AOT
+compilation, activation checkpointing, packed sparse MoS, PrefixLM cache parity,
+and both full and truncated backward paths. A four-step CPU campaign with H
+MoE, L MoS, both new flags and automatic LR matched uninterrupted training
+exactly after saving at step two and resuming: model, optimizer, EMA, RNG, losses
+and LR metrics all matched. The installed Hydra preset composed successfully.
+
+See `qualification/persistent-h.json` and
+[configuration and semantics](persistent-h-streams.md). The initial full-suite
+compile test exposed unsupported automatic symbolic specialization of recurrence
+integers; the final test explicitly uses `dynamic=False`, as the training entry
+point already does. GPU/FA4/FSDP2 qualification remains pending; export and
+serving reject the two flags until the dependency forks implement them.

@@ -1,0 +1,9 @@
+# @package _global_
+# Override arch.h_branch_l_mixing=false for shared L injection.
+arch:
+  residual_branches: 2
+  residual_levels: H
+  h_residual_persistence: true
+  h_branch_l_mixing: true
+  mos_num_experts: 2
+  mos_top_k: 2

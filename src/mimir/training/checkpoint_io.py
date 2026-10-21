@@ -94,6 +94,12 @@ def checkpoint_carry_policy(checkpoint_path: str, tag: str, metadata: dict) -> L
 
 
 
+def same_architecture(previous, current):
+    """Older checkpoints predate these opt-in flags; absence means disabled."""
+    defaults = dict(h_residual_persistence=False, h_branch_l_mixing=False)
+    return previous is not None and (defaults | previous) == (defaults | current)
+
+
 def resolve_resume_state(config: PretrainConfig, current_local_batch_size: int) -> Optional[ResumeState]:
     if config.resume_checkpoint_path is None and config.resume_checkpoint_tag is None:
         return None
@@ -186,7 +192,7 @@ def load_train_checkpoint(config: PretrainConfig, train_state: TrainState, rank:
             if previous.get(key) != current.get(key):
                 raise ValueError(f"Exact continuation configuration changed: {key}")
         if not config.arch.upcycle_from_dense and not config.arch.gate_initialize_from_v1:
-            if previous.get('arch') != current['arch']:
+            if not same_architecture(previous.get('arch'), current['arch']):
                 raise ValueError('Exact continuation architecture changed')
         old_metadata = yaml.safe_load((Path(config.resume_checkpoint_path) / 'train_metadata.yaml').read_text())
         # Re-read the corpus metadata before loading state; the dataset reader normalizes it.

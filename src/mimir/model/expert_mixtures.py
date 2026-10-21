@@ -122,7 +122,7 @@ def is_new_v2_key(key):
     return bool(set(key.split('.')) & {
         'router', 'stack_router', 'invocation_gates', 'gate_alpha',
         'attn_residual', 'mlp_residual', 'residual_alpha', 'residual_readout',
-        'memory', 'ngram', 'routing_bias_scale',
+        'memory', 'ngram', 'routing_bias_scale', 'l_branch_mixer',
     })
 
 

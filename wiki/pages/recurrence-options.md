@@ -57,3 +57,6 @@ and cached decode. GPU/distributed qualification of this new mode is pending.
 Looped export and serving explicitly fail: the pinned Transformers/vLLM forks
 implement hierarchical recurrence only. Native checkpoints retain the new
 configuration; do not reinterpret looped weights as hierarchical exports.
+
+For hierarchical recurrence, [persistent H streams](persistent-h-streams.md)
+optionally preserve H residual branches and give them different L expert mixtures.

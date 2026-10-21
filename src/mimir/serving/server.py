@@ -30,6 +30,8 @@ def command(spec):
     if cfg.get('model_type')!='mimir2':raise ValueError('Only Mimir2 can be served')
     if cfg.get('recurrence_mode', 'hierarchical') != 'hierarchical':
         raise ValueError('Looped recurrence is not supported by the pinned inference forks')
+    if cfg.get('h_residual_persistence') or cfg.get('h_branch_l_mixing'):
+        raise ValueError('Persistent H streams and branch-specific L mixing require inference fork support')
     if cfg.get('mos_sparse') and not spec.eager:raise ValueError('Sparse MoS requires explicitly selected eager execution')
     if not spec.gpus or any(not s.isdigit() for s in spec.gpus.split(',')):raise ValueError('Explicit GPU indices required')
     args=[sys.executable,'-m','vllm.entrypoints.openai.api_server','--model',spec.model,

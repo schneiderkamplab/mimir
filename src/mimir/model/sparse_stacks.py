@@ -57,13 +57,14 @@ def cached_sequence_routes(model, x, cache, seq_info, bias=None):
 
 
 @torch.compiler.disable
-def batched_sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, seq_info, weights, cache=None):
+def batched_sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, seq_info, weights, cache=None, expert_outputs=None):
     cores = [model.L_level.core, *model.L_level.stack_experts]
     output, next_states = torch.zeros_like(z_h), []
     for expert_id, core in enumerate(cores):
         selected = (weights[:, expert_id] != 0).nonzero().flatten()
         previous = (states[expert_id] if states is not None else z_l).expand_as(z_h)
         candidate = previous
+        expert_value = torch.zeros_like(z_h) if expert_outputs is not None else None
         if len(selected):
             info = dict(seq_info)
             positions = info.get('position_ids')
@@ -79,6 +80,8 @@ def batched_sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, 
                          stability_scope=f'L/cycle_{invocation:03d}/expert_{expert_id}' if diagnostics else None)
             output = output.index_add(0, selected, value * weights[selected, expert_id, None, None].to(value.dtype))
             candidate = previous.index_copy(0, selected, value)
+            if expert_outputs is not None:
+                expert_value = expert_value.index_copy(0, selected, value)
         elif cache is None and model.training:
             # Keep distributed collective ordering consistent for idle experts.
             info = dict(seq_info)
@@ -87,13 +90,17 @@ def batched_sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, 
             injection = model._inject(model.L_level, invocation, previous, z_h)
             dummy = core((previous + injection)[:1], **info)
             output = output + dummy.sum() * 0
+            if expert_outputs is not None:
+                expert_value = expert_value + dummy.sum() * 0
+        if expert_outputs is not None:
+            expert_outputs.append((expert_value, weights[:, expert_id, None, None]))
         if states is not None:
             next_states.append(candidate)
     return output, next_states if states is not None else None
 
 
 @torch.compiler.disable
-def sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, seq_info, weights):
+def sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, seq_info, weights, expert_outputs=None):
     cores = [model.L_level.core, *model.L_level.stack_experts]
     nseq = int(unwrap_tensor(seq_info['numseqs']))
     bounds = seq_info['cu_seqlens'][:nseq + 1].tolist()
@@ -135,13 +142,21 @@ def sparse_stack_step(model, z_l, z_h, states, invocation, diagnostics, seq_info
                  stability_diagnostics=diagnostics if chosen else None,
                  stability_scope=f'L/cycle_{invocation:03d}/expert_{expert_id}' if diagnostics and chosen else None)
         y = y[:valid_tokens]
+        if expert_outputs is not None:
+            expert_value = torch.zeros_like(z_h) + y.sum() * 0
+            expert_weight = weights.new_zeros(z_h.shape[0], 1)
         if chosen:
             token_weights = torch.cat([weights[s, expert_id].expand(bounds[s + 1] - bounds[s]) for s in chosen])
             output = output.index_add(0, indices, y * token_weights[:, None].to(y.dtype))
+            if expert_outputs is not None:
+                expert_value = expert_value.index_copy(0, indices, y)
+                expert_weight = expert_weight.index_copy(0, indices, token_weights[:, None])
             if states is not None:
                 next_states.append(previous.index_copy(0, indices, y))
         else:
             output = output + y.sum() * 0
             if states is not None:
                 next_states.append(previous)
+        if expert_outputs is not None:
+            expert_outputs.append((expert_value, expert_weight))
     return output, next_states if states is not None else None

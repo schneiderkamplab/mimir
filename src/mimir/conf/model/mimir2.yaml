@@ -34,6 +34,8 @@ residual_warmup_start_step: 0
 residual_warmup_steps: 0
 residual_write_init_scale: 0.1
 residual_input_dependent: false
+h_residual_persistence: false
+h_branch_l_mixing: false
 upcycle_from_dense: false
 moe_sparse: false
 mos_sparse: false

@@ -43,3 +43,7 @@ qualified execution paths.
 Opt-in single-stream recurrence and zero-layer H are documented in
 [recurrence options](recurrence-options.md), with independent H MoE / L MoS
 and residual-branch configuration examples. Default recurrence is unchanged.
+
+[Persistent H streams](persistent-h-streams.md) add opt-in depth persistence and
+branch-specific L expert mixtures. These extensions are native-only until the
+inference forks gain matching implementations.
