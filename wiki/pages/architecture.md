@@ -47,3 +47,6 @@ and residual-branch configuration examples. Default recurrence is unchanged.
 [Persistent H streams](persistent-h-streams.md) add opt-in depth persistence and
 branch-specific L expert mixtures. These extensions are native-only until the
 inference forks gain matching implementations.
+
+[Auxiliary-loss-free routing](aux-loss-free-routing.md) optionally balances MoE
+and MoS selections with step-level bias updates, without an auxiliary loss.

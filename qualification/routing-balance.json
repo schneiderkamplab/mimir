@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-22",
+  "feature": "optional MoE/MoS aux-loss-free bias balancing",
+  "full_cpu_tests": 309,
+  "full_cpu_subtests": 28,
+  "installed_targeted_tests": 17,
+  "installed_targeted_subtests": 12,
+  "scheduler_backup_tests": 12,
+  "gpu_qualification": "not run; GPUs occupied",
+  "queue_jobs": 266,
+  "held_jobs": 0,
+  "attempts_at_verification": 0,
+  "training_order": [
+    "default",
+    "engram",
+    "moe",
+    "mos",
+    "muon",
+    "moe_balanced",
+    "mos_balanced"
+  ],
+  "evaluation": "task parallel, TP=1",
+  "runner_verified_alive": true,
+  "runner_state": "waiting_for_gpus"
+}

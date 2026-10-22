@@ -52,7 +52,8 @@ def schedule(database:Path,plan:Path|None=None,run:bool=False,
     if plan:
         for row in json.loads(plan.read_text())['jobs']:
             store.add(row['id'],row['kind'],row['config'],
-                      [(d['id'],d.get('policy','success')) for d in row.get('depends',[])],row.get('max_attempts',3))
+                      [(d['id'],d.get('policy','success')) for d in row.get('depends',[])],row.get('max_attempts',3),
+                      held=row.get('held',False))
     if run:
         from mimir.training.suspension.protocol import exclusive
         from mimir.serving.server import ServerPool

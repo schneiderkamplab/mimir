@@ -56,3 +56,7 @@ routing_bias_decay_start: 0
 routing_bias_decay_end: 0
 specialist_training: false
 specialist_router_calibration: false
+
+moe_aux_loss_free: false
+mos_aux_loss_free: false
+routing_bias_update_rate: 0.001

@@ -10,6 +10,7 @@ from mimir.model.common import IGNORE_LABEL_ID, prepare_prefixlm_batch, wrap_ten
 from mimir.model.gradient_clipping import clip_grad_norm_mean_units
 from mimir.training.config import PretrainConfig
 from mimir.training.state import TrainState
+from mimir.model.routing_balance import balanced_optimizer_step
 
 
 def forward_backward_batch_uncompiled(train_state: TrainState, batch: dict[str, Tensor], loss_scale: Tensor, **kwargs):
@@ -33,6 +34,7 @@ def compiled_forward_backward_batch(mode: str):
 
 
 
+@balanced_optimizer_step
 def train_batch(train_state: TrainState, batch: dict[str, Tensor], **kwargs):
     metrics = forward_backward_batch(train_state, batch, torch.tensor(1.0, device=batch["inputs"].device), **kwargs)
     train_state.optim.step()
@@ -41,6 +43,7 @@ def train_batch(train_state: TrainState, batch: dict[str, Tensor], **kwargs):
 
 
 
+@balanced_optimizer_step
 def train_batch_uncompiled(train_state: TrainState, batch: dict[str, Tensor], **kwargs):
     metrics = forward_backward_batch_uncompiled(train_state, batch, torch.tensor(1.0, device=batch["inputs"].device), **kwargs)
     train_state.optim.step()
@@ -73,6 +76,7 @@ def _supervised_token_count(config: PretrainConfig, rank: int, batch: dict[str, 
 
 
 
+@balanced_optimizer_step
 def train_accumulated_batches(
     config: PretrainConfig,
     rank: int,

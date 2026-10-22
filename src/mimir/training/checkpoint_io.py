@@ -96,7 +96,8 @@ def checkpoint_carry_policy(checkpoint_path: str, tag: str, metadata: dict) -> L
 
 def same_architecture(previous, current):
     """Older checkpoints predate these opt-in flags; absence means disabled."""
-    defaults = dict(h_residual_persistence=False, h_branch_l_mixing=False)
+    defaults = dict(h_residual_persistence=False, h_branch_l_mixing=False,
+                    moe_aux_loss_free=False, mos_aux_loss_free=False, routing_bias_update_rate=0.001)
     return previous is not None and (defaults | previous) == (defaults | current)
 
 

@@ -33,6 +33,10 @@ class Mimir2NativeParityTest(unittest.TestCase):
             ).transpose(-3, -2)
 
         features = [
+            {"moe_num_experts": 3, "moe_top_k": 2, "moe_aux_loss_free": True},
+            {"mos_num_experts": 3, "mos_top_k": 1, "mos_aux_loss_free": True},
+            {"moe_num_experts": 3, "moe_top_k": 1, "moe_aux_loss_free": True, "moe_sparse": True,
+             "mos_num_experts": 2, "mos_top_k": 1, "mos_aux_loss_free": True},
             {},
             {"gates_enabled": True},
             {"moe_num_experts": 3, "moe_top_k": 2, "moe_sparse": True},
@@ -86,6 +90,8 @@ class Mimir2NativeParityTest(unittest.TestCase):
                         ):
                             param.normal_(std=0.1)
                     for name, buffer in native.named_buffers():
+                        if name.endswith("selection_bias"):
+                            buffer.copy_(torch.linspace(-.2,.2,buffer.numel()))
                         if name.endswith("alpha"):
                             buffer.fill_(0.7)
                 converted = convert_checkpoint(native.state_dict(), config).eval()
@@ -95,6 +101,11 @@ class Mimir2NativeParityTest(unittest.TestCase):
                     expected = native(None, {"inputs": ids, "position_ids": positions}, bp_steps=8)[1]
                     actual = converted(ids, use_cache=False).logits
                 torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+                if extra.get("moe_aux_loss_free") or extra.get("mos_aux_loss_free"):
+                    with torch.no_grad():
+                        prefill=converted(ids[:,:-1],use_cache=True)
+                        decode=converted(ids[:,-1:],past_key_values=prefill.past_key_values,use_cache=True)
+                    torch.testing.assert_close(decode.logits[:,-1],actual[:,-1],rtol=2e-5,atol=2e-6)
                 if extra.get("ngram_contextual_gate"):
                     # Loaded-weight native greedy reference versus HF cached generation.
                     tokens = ids.clone()

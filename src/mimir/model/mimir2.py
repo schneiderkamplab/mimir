@@ -35,6 +35,9 @@ class Mimir2Config(BaselineConfig):
     mos_state_mode: Literal["shared", "separate"] = "shared"
     expert_freeze_base: bool = False
     router_top1_straight_through: bool = True
+    moe_aux_loss_free: bool = False
+    mos_aux_loss_free: bool = False
+    routing_bias_update_rate: float = Field(default=0.001, ge=0, allow_inf_nan=False)
     residual_branches: int = Field(default=1, ge=1)
     residual_levels: Literal["L", "H", "both"] = "both"
     residual_alpha_max: float = Field(default=1.0, ge=0, le=1)
@@ -67,6 +70,10 @@ class Mimir2Config(BaselineConfig):
 
     @model_validator(mode="after")
     def validate_experts(self):
+        if self.moe_aux_loss_free and self.moe_num_experts < 2:
+            raise ValueError("MoE balancing requires multiple MoE experts")
+        if self.mos_aux_loss_free and self.mos_num_experts < 2:
+            raise ValueError("MoS balancing requires multiple MoS experts")
         h_layers = self.H_override.get("n_layers", self.n_layers)
         if self.n_layers < 1 or h_layers < 0:
             raise ValueError("L requires positive layers and H requires nonnegative layers")
@@ -150,7 +157,8 @@ class Mimir2(Baseline):
                 continue
             if config.moe_levels in (name, "both"):
                 install_mlp_mixtures(level.core, self.hidden_size,
-                                     config.moe_num_experts, config.moe_top_k, sparse=config.moe_sparse, **options)
+                                     config.moe_num_experts, config.moe_top_k, sparse=config.moe_sparse,
+                                     balance_enabled=config.moe_aux_loss_free, balance_update_rate=config.routing_bias_update_rate, **options)
                 if config.moe_num_experts > 1:
                     from mimir.model.routed_block import RoutedBlock
                     norm = config.H_override.get('norm_type', config.norm_type) if name == 'H' else config.norm_type
@@ -166,7 +174,8 @@ class Mimir2(Baseline):
                 copy.deepcopy(self.L_level.core) for _ in range(config.mos_num_experts - 1)
             )
             self.L_level.stack_router = TopKRouter(self.hidden_size, config.mos_num_experts,
-                                                  config.mos_top_k, **options)
+                                                  config.mos_top_k, balance_enabled=config.mos_aux_loss_free,
+                                                  balance_update_rate=config.routing_bias_update_rate, **options)
             if config.expert_freeze_base:
                 self.L_level.core.requires_grad_(False)
             self.create_cache = self._create_expert_cache

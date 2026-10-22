@@ -22,6 +22,11 @@ def render(store):
             except (OSError,ValueError,KeyError):pass
         table.add_row(row['id'],row['state']+(' (held)' if row['held'] else ''),str(row['attempt']),', '.join(cfg.get('resources',[])),progress,eta)
     table.title='Mimir queue — '+', '.join(f'{n} {s}' for s,n in sorted(counts.items()))
+    try:
+        status=json.loads((store.path.parent/'idle-status.json').read_text())
+        age=max(0,time.time()-status['time'])
+        table.caption=f"Scheduler: {status['state']} ({age:.0f}s ago). {status.get('reason','')}"
+    except (OSError,ValueError,KeyError):pass
     return table
 
 

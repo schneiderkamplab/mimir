@@ -1,0 +1,45 @@
+{
+  "status": "prepared_not_started",
+  "steps_per_run": 20000,
+  "held_jobs": 152,
+  "attempts": 0,
+  "gpu_assignment": [],
+  "capacity": {
+    "default": {
+      "capacity": 5505024,
+      "token_embedding_and_lm_head": 134217728,
+      "total": 139722752,
+      "ratio_to_default": 1.0,
+      "difference_from_double_percent": -50.0
+    },
+    "engram": {
+      "capacity": 11010048,
+      "token_embedding_and_lm_head": 134217728,
+      "total": 145227776,
+      "ratio_to_default": 2.0,
+      "difference_from_double_percent": 0.0
+    },
+    "moe": {
+      "capacity": 10816524,
+      "token_embedding_and_lm_head": 134217728,
+      "total": 145034252,
+      "ratio_to_default": 1.964845929827009,
+      "difference_from_double_percent": -1.7577035086495552
+    },
+    "mos": {
+      "capacity": 11010819,
+      "token_embedding_and_lm_head": 134217728,
+      "total": 145228547,
+      "ratio_to_default": 2.000140053885324,
+      "difference_from_double_percent": 0.00700269426618938
+    }
+  },
+  "recipe_sha256": "5be834996a8db6dcf99581271eae30f7adc896ebb445b33d5b4d8f5151db4bda",
+  "evaluation": "final EMA; frozen Inspect, Danish, EuroEval suites",
+  "validation": "meta parameter counts, bounded corpus windows, local SQLite backup and native monitor; GPU and benchmark execution not run",
+  "cpu_tests": {
+    "passed": 290,
+    "subtests_passed": 25,
+    "warnings": 28
+  }
+}

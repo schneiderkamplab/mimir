@@ -23,3 +23,25 @@ same turn; preserve superseded claims with date/context.
   sibling repository. Configuration code hashes are provenance, not resume gates.
 
 Validation and outstanding qualification: [validation](wiki/pages/validation.md).
+
+## Verification checklist
+
+- Follow [README installation instructions](README.md) and use the locked
+  dependencies. After installing patched Transformers/vLLM, use the environment's
+  Python/executables directly or `uv run --no-sync`. Ordinary `uv run` or another
+  sync can replace patched installs with the base revisions.
+- Confirm tests import the code being changed: use an editable Mimir installation
+  or rebuild/reinstall its wheel before testing. An installed wheel does not
+  automatically reflect edits under `src/`.
+- Run relevant CPU tests first; run the full suite for changes affecting model,
+  training or checkpoint behavior. With the prepared environment active:
+  `CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 python -m pytest -q`.
+- For end-to-end checkpoint/export/resume changes, run
+  `python tools/qualify_cpu.py .runtime/<new-campaign-directory>`.
+  This qualifies the default architecture; feature-specific checks are still
+  required for modes unsupported by the inference forks.
+- Update linked wiki pages and qualification evidence as appropriate, then run
+  `python scripts/validate_okf.py wiki` and `git diff --check`.
+- Report what was actually tested and outstanding limits. Consult the
+  [validation record](wiki/pages/validation.md) for dated results rather than
+  treating historical test counts as current or CPU checks as GPU qualification.

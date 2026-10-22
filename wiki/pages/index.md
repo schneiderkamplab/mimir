@@ -7,3 +7,5 @@
 - [Evaluation](evaluation.md)
 - [Scheduling](scheduling.md)
 - [Validation and remaining qualification](validation.md)
+- [XXS DFM15 ablation preparation](xxs-dfm15-ablation.md)
+- [Auxiliary-loss-free routing balance](aux-loss-free-routing.md)

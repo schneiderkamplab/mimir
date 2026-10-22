@@ -150,7 +150,7 @@ index b958ef79d0..13c6d937fa 100644
                  set_forward_context(
 diff --git a/docs/models/mimir2.md b/docs/models/mimir2.md
 new file mode 100644
-index 0000000000..e5d861b478
+index 0000000000..00108750c0
 --- /dev/null
 +++ b/docs/models/mimir2.md
 @@ -0,0 +1,99 @@
@@ -672,7 +672,7 @@ index 0000000000..51f983fabb
 +    unittest.main()
 diff --git a/vllm/model_executor/models/mimir2.py b/vllm/model_executor/models/mimir2.py
 new file mode 100644
-index 0000000000..f965f881e3
+index 0000000000..081733b318
 --- /dev/null
 +++ b/vllm/model_executor/models/mimir2.py
 @@ -0,0 +1,525 @@
@@ -794,7 +794,7 @@ index 0000000000..f965f881e3
 +            make_mlp(config, f"{prefix}.experts.{i}")
 +            for i in range(config.moe_num_experts)
 +        )
-+        self.router = Mimir2Router(config, config.moe_num_experts, config.moe_top_k)
++        self.router = Mimir2Router(config, config.moe_num_experts, config.moe_top_k, config.moe_aux_loss_free)
 +
 +    def forward(self, hidden):
 +        weights = self.router(hidden)
@@ -974,7 +974,7 @@ index 0000000000..f965f881e3
 +                for i in range(config.mos_num_experts - 1)
 +            )
 +            self.L_module.stack_router = Mimir2Router(
-+                config, config.mos_num_experts, config.mos_top_k
++                config, config.mos_num_experts, config.mos_top_k, config.mos_aux_loss_free
 +            )
 +
 +    def embed_input_ids(self, input_ids):

@@ -50,14 +50,16 @@ class Store:
             raise
         finally: db.close()
 
-    def add(self, identity, kind, config, dependencies=(), max_attempts=3):
+    def add(self, identity, kind, config, dependencies=(), max_attempts=3, *, held=False):
+        if not isinstance(held, bool):
+            raise ValueError('held must be a boolean')
         if kind not in KINDS or max_attempts < 1:
             raise ValueError('Invalid job kind or retry bound')
         if not identity or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-' for c in identity):
             raise ValueError('Job ID must be a safe filename')
         with self.transaction() as db:
-            db.execute('INSERT INTO jobs(id,kind,config,max_attempts,created) VALUES(?,?,?,?,?)',
-                       (identity, kind, json.dumps(config, allow_nan=False), max_attempts, time.time()))
+            db.execute('INSERT INTO jobs(id,kind,config,max_attempts,created,held) VALUES(?,?,?,?,?,?)',
+                       (identity, kind, json.dumps(config, allow_nan=False), max_attempts, time.time(), int(held)))
             for dependency, policy in dependencies:
                 if dependency == identity:
                     raise ValueError('Self-dependency')
@@ -79,7 +81,7 @@ class Store:
         with self.transaction() as db:
             db.execute('UPDATE jobs SET held=? WHERE id=?', (int(value), identity))
 
-    def claim(self, ttl=120):
+    def claim(self, ttl=120, predicate=None):
         if ttl <= 0: raise ValueError('Positive lease duration required')
         with self.transaction() as db:
             # Propagate failed prerequisites; terminal handoffs remain runnable.
@@ -95,6 +97,7 @@ class Store:
               ORDER BY created,id""").fetchall()
             for row in candidates:
                 config = json.loads(row['config']); resources = sorted(set(config.get('resources', [])))
+                if predicate is not None and not predicate(dict(row) | {'config': config}):continue
                 if any(db.execute('SELECT 1 FROM resources WHERE name=?', (r,)).fetchone() for r in resources):continue
                 token = uuid.uuid4().hex; now = time.time(); number = row['attempt'] + 1
                 import os, psutil

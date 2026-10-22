@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "xxs-dfm15-20k",
+  "steps": 20000,
+  "capacity_definition": "All trainable parameters except embed_tokens and lm_head; n-gram tables count as added capacity.",
+  "common_overrides": [
+    "size@arch=XXS", "seed=0", "epochs=1", "training_total_steps=20000",
+    "max_steps=20000", "stop_after_step=20000", "checkpoint_step_interval=5000",
+    "project_name=mimir-xxs-dfm15-ablation"
+  ],
+  "variants": {
+    "default": [],
+    "engram": ["arch.ngram_orders=[2,3]", "arch.ngram_buckets=10496", "arch.ngram_heads=4", "arch.ngram_contextual_gate=true"],
+    "moe": ["arch.moe_num_experts=4", "arch.moe_top_k=1", "arch.moe_levels=L"],
+    "mos": ["arch.mos_num_experts=3", "arch.mos_top_k=1"]
+  },
+  "suites": ["comparison-inspect-v1", "comparison-danish-v1", "comparison-euroeval-v1"],
+  "default_eval_steps": [20000],
+  "all_jobs_held": true
+}

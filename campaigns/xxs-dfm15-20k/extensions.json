@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "after": "mos",
+  "variants": {
+    "muon": {"source": "default", "overrides": ["optimizer=muon"]},
+    "moe_balanced": {"source": "moe", "overrides": ["arch.moe_aux_loss_free=true", "arch.routing_bias_update_rate=0.001"]},
+    "mos_balanced": {"source": "mos", "overrides": ["arch.mos_aux_loss_free=true", "arch.routing_bias_update_rate=0.001"]}
+  }
+}

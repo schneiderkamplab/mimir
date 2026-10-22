@@ -62,8 +62,8 @@ def execute(job, output, server_pool=None):
     return {'returncode':code,'stderr':str(output/'stderr.log')}
 
 
-def run_one(store, output, server_pool=None):
-    job=store.claim()
+def run_one(store, output, server_pool=None, predicate=None):
+    job=store.claim(predicate=predicate)
     if not job:return False
     if server_pool is not None and job['kind']=='train':server_pool.close()
     from mimir.evaluation.metrics import write_record

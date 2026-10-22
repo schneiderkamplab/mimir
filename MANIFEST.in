@@ -8,3 +8,4 @@ recursive-include qualification *.json
 recursive-include tests *.py *.yaml
 
 recursive-include licenses *.txt
+recursive-include campaigns *.json *.md

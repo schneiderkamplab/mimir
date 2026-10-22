@@ -10,11 +10,15 @@ from torch.nn import functional as F
 
 class TopKRouter(nn.Module):
     def __init__(self, hidden_size, n, k, *, freeze_base=False,
-                 top1_straight_through=True):
+                 top1_straight_through=True, balance_enabled=False, balance_update_rate=0.001):
         super().__init__()
         if not 1 <= k <= n:
             raise ValueError("Routing requires 1 <= k <= n")
         self.n, self.k = n, k
+        self.balance_enabled = balance_enabled
+        self.balance_update_rate = balance_update_rate
+        if balance_enabled:
+            self.register_buffer("selection_bias", torch.zeros(n, dtype=torch.float32))
         self.top1_straight_through = top1_straight_through
         # Separate rows make reference-router freezing real, including weight decay.
         self.rows = nn.ParameterList([
@@ -27,6 +31,14 @@ class TopKRouter(nn.Module):
         ])
         self.register_buffer("logit_bias", torch.zeros(n))
 
+    def _apply(self, fn, recurse=True):
+        bias = getattr(self, "selection_bias", None)
+        result = super()._apply(fn, recurse=recurse)
+        if self.balance_enabled:
+            self.selection_bias = (self.selection_bias.float() if bias.is_meta else
+                                   bias.to(device=self.selection_bias.device, dtype=torch.float32))
+        return result
+
     def forward(self, x, logit_bias=None):
         scores = F.linear(x.float(), torch.stack(list(self.rows)).float(),
                           torch.cat(list(self.biases)).float())
@@ -34,24 +46,34 @@ class TopKRouter(nn.Module):
         if logit_bias is not None:
             scores = scores + logit_bias.float()
         # Stable tie breaking is reproducible, but not a load-balancing mechanism.
-        selected = scores.argsort(dim=-1, descending=True, stable=True)[..., :self.k]
+        affinity = scores.sigmoid() if self.balance_enabled else scores
+        selection = affinity + self.selection_bias.float() if self.balance_enabled else scores
+        selected = selection.argsort(dim=-1, descending=True, stable=True)[..., :self.k]
         mask = torch.zeros_like(scores, dtype=torch.bool).scatter(-1, selected, True)
-        weights = scores.masked_fill(~mask, -torch.inf).softmax(-1)
+        if self.balance_enabled:
+            from mimir.model.routing_balance import record_load
+            record_load(self, mask)
+            weights = affinity * mask
+            weights = weights / weights.sum(-1, keepdim=True).clamp_min(torch.finfo(weights.dtype).tiny)
+        else:
+            weights = scores.masked_fill(~mask, -torch.inf).softmax(-1)
         if self.k == 1 and self.n > 1 and self.top1_straight_through:
             # Normalized top-1 is constant. Use an explicit surrogate derivative
             # from the full softmax on selected entries; forward weights stay 0/1.
-            surrogate = scores.softmax(-1) * mask
+            probabilities = affinity / affinity.sum(-1, keepdim=True).clamp_min(torch.finfo(affinity.dtype).tiny) if self.balance_enabled else scores.softmax(-1)
+            surrogate = probabilities * mask
             weights = weights + (surrogate - surrogate.detach())
         return weights
 
 
 class MLPMixture(nn.Module):
     def __init__(self, mlp, hidden_size, n, k, *, freeze_base=False,
-                 top1_straight_through=True, sparse=False):
+                 top1_straight_through=True, sparse=False, balance_enabled=False, balance_update_rate=0.001):
         super().__init__()
         self.experts = nn.ModuleList([mlp] + [copy.deepcopy(mlp) for _ in range(n - 1)])
         self.router = TopKRouter(hidden_size, n, k, freeze_base=freeze_base,
-                                 top1_straight_through=top1_straight_through)
+                                 top1_straight_through=top1_straight_through,
+                                 balance_enabled=balance_enabled, balance_update_rate=balance_update_rate)
         self.sparse = sparse
         if freeze_base:
             self.experts[0].requires_grad_(False)
